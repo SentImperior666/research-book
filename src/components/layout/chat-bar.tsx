@@ -1,5 +1,6 @@
 import { MessageSquare, ChevronUp, ChevronDown } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
+import { ChatPanel } from "@/components/chat/chat-panel"
 
 export function ChatBar() {
   const chatExpanded = useWikiStore((s) => s.chatExpanded)
@@ -32,18 +33,8 @@ export function ChatBar() {
         </span>
         <ChevronDown className="h-4 w-4" />
       </button>
-      <div className="flex-1 overflow-auto p-4">
-        <p className="text-sm text-muted-foreground">
-          Chat will be available in Phase 2 (LLM Integration).
-        </p>
-      </div>
-      <div className="border-t p-3">
-        <input
-          type="text"
-          placeholder="Type a message..."
-          disabled
-          className="w-full rounded-md border bg-muted/50 px-3 py-2 text-sm"
-        />
+      <div className="flex-1 overflow-hidden">
+        <ChatPanel />
       </div>
     </div>
   )
