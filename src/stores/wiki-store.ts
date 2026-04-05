@@ -15,7 +15,7 @@ interface WikiState {
   selectedFile: string | null
   fileContent: string
   chatExpanded: boolean
-  activeView: "wiki" | "sources" | "search" | "graph" | "lint" | "settings"
+  activeView: "wiki" | "sources" | "search" | "graph" | "lint" | "review" | "settings"
   llmConfig: LlmConfig
 
   setProject: (project: WikiProject | null) => void

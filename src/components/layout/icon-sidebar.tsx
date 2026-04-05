@@ -1,8 +1,9 @@
 import {
-  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight,
+  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList,
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useWikiStore } from "@/stores/wiki-store"
+import { useReviewStore } from "@/stores/review-store"
 import type { WikiState } from "@/stores/wiki-store"
 
 const navItems: { view: WikiState["activeView"]; icon: typeof FileText; label: string }[] = [
@@ -11,6 +12,7 @@ const navItems: { view: WikiState["activeView"]; icon: typeof FileText; label: s
   { view: "search", icon: Search, label: "Search" },
   { view: "graph", icon: Network, label: "Graph" },
   { view: "lint", icon: ClipboardCheck, label: "Lint" },
+  { view: "review", icon: ClipboardList, label: "Review" },
   { view: "settings", icon: Settings, label: "Settings" },
 ]
 
@@ -21,6 +23,7 @@ interface IconSidebarProps {
 export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
   const activeView = useWikiStore((s) => s.activeView)
   const setActiveView = useWikiStore((s) => s.setActiveView)
+  const pendingCount = useReviewStore((s) => s.items.filter((i) => !i.resolved).length)
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -30,15 +33,23 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
             <Tooltip key={view}>
               <TooltipTrigger
                 onClick={() => setActiveView(view)}
-                className={`flex h-10 w-10 items-center justify-center rounded-md transition-colors ${
+                className={`relative flex h-10 w-10 items-center justify-center rounded-md transition-colors ${
                   activeView === view
                     ? "bg-accent text-accent-foreground"
                     : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
                 }`}
               >
                 <Icon className="h-5 w-5" />
+                {view === "review" && pendingCount > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                    {pendingCount > 99 ? "99+" : pendingCount}
+                  </span>
+                )}
               </TooltipTrigger>
-              <TooltipContent side="right">{label}</TooltipContent>
+              <TooltipContent side="right">
+                {label}
+                {view === "review" && pendingCount > 0 && ` (${pendingCount})`}
+              </TooltipContent>
             </Tooltip>
           ))}
         </div>

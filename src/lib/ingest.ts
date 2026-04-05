@@ -3,6 +3,7 @@ import { streamChat } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useChatStore } from "@/stores/chat-store"
+import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 
 const FILE_BLOCK_REGEX = /---FILE:\s*([^\n-]+?)\s*---\n([\s\S]*?)---END FILE---/g
 
@@ -33,7 +34,10 @@ export async function autoIngest(
 
   const systemPrompt = [
     "You are a wiki maintainer. You will read a source document and directly produce wiki files.",
-    "Output ONLY wiki files in this exact format:",
+    "",
+    "## Output Format",
+    "",
+    "Output wiki files in this format:",
     "",
     "---FILE: wiki/sources/filename.md---",
     "(complete file content with YAML frontmatter)",
@@ -48,6 +52,23 @@ export async function autoIngest(
     "",
     "Use YAML frontmatter on every page. Use [[wikilink]] syntax for cross-references.",
     "Use kebab-case filenames.",
+    "",
+    "## Review Items",
+    "",
+    "After the FILE blocks, if you find anything that needs human judgment, output REVIEW blocks:",
+    "",
+    "---REVIEW: type | Title---",
+    "Description of what needs attention.",
+    "OPTIONS: Option A | Option B | Option C",
+    "PAGES: wiki/page1.md, wiki/page2.md",
+    "---END REVIEW---",
+    "",
+    "Review types: contradiction, duplicate, missing-page, suggestion",
+    "Only create reviews for things that genuinely need human input. Examples:",
+    "- Contradiction: new source conflicts with existing wiki content",
+    "- Duplicate: an entity/concept might already exist under a different name",
+    "- Missing page: an important concept is referenced but has no dedicated page yet",
+    "- Suggestion: ideas for further research or sources to look for",
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
     schema ? `## Wiki Schema\n${schema}` : "",
@@ -101,6 +122,13 @@ export async function autoIngest(
     getStore().addMessage("system", "No wiki files were generated.")
   }
 
+  // Parse and add review items
+  const reviewItems = parseReviewBlocks(accumulated, sourcePath)
+  if (reviewItems.length > 0) {
+    useReviewStore.getState().addItems(reviewItems)
+    getStore().addMessage("system", `📋 ${reviewItems.length} item(s) added to Review for your attention.`)
+  }
+
   return writtenPaths
 }
 
@@ -129,6 +157,63 @@ async function writeFileBlocks(projectPath: string, text: string): Promise<strin
   }
 
   return writtenPaths
+}
+
+const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
+
+function parseReviewBlocks(
+  text: string,
+  sourcePath: string,
+): Omit<ReviewItem, "id" | "resolved" | "createdAt">[] {
+  const items: Omit<ReviewItem, "id" | "resolved" | "createdAt">[] = []
+  const matches = text.matchAll(REVIEW_BLOCK_REGEX)
+
+  for (const match of matches) {
+    const rawType = match[1].trim().toLowerCase()
+    const title = match[2].trim()
+    const body = match[3].trim()
+
+    const type = (
+      ["contradiction", "duplicate", "missing-page", "suggestion"].includes(rawType)
+        ? rawType
+        : "confirm"
+    ) as ReviewItem["type"]
+
+    // Parse OPTIONS line
+    const optionsMatch = body.match(/^OPTIONS:\s*(.+)$/m)
+    const options = optionsMatch
+      ? optionsMatch[1].split("|").map((o) => {
+          const label = o.trim()
+          return { label, action: label }
+        })
+      : [
+          { label: "Approve", action: "Approve" },
+          { label: "Skip", action: "Skip" },
+        ]
+
+    // Parse PAGES line
+    const pagesMatch = body.match(/^PAGES:\s*(.+)$/m)
+    const affectedPages = pagesMatch
+      ? pagesMatch[1].split(",").map((p) => p.trim())
+      : undefined
+
+    // Description is the body minus OPTIONS and PAGES lines
+    const description = body
+      .replace(/^OPTIONS:.*$/m, "")
+      .replace(/^PAGES:.*$/m, "")
+      .trim()
+
+    items.push({
+      type,
+      title,
+      description,
+      sourcePath,
+      affectedPages,
+      options,
+    })
+  }
+
+  return items
 }
 
 function getStore() {

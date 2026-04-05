@@ -7,6 +7,7 @@ import { FilePreview } from "@/components/editor/file-preview"
 import { ChatBar } from "./chat-bar"
 import { SettingsView } from "@/components/settings/settings-view"
 import { SourcesView } from "@/components/sources/sources-view"
+import { ReviewView } from "@/components/review/review-view"
 
 export function ContentArea() {
   const selectedFile = useWikiStore((s) => s.selectedFile)
@@ -62,6 +63,10 @@ export function ContentArea() {
 
   if (activeView === "sources") {
     return <SourcesView />
+  }
+
+  if (activeView === "review") {
+    return <ReviewView />
   }
 
   const category = selectedFile ? getFileCategory(selectedFile) : null
