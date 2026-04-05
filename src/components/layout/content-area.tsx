@@ -50,7 +50,7 @@ export function ContentArea() {
   const isMarkdown = selectedFile?.endsWith(".md")
 
   const editorContent = (
-    <div className="h-full overflow-auto">
+    <div className="h-full min-w-0 overflow-auto">
       {selectedFile ? (
         isMarkdown ? (
           <WikiEditor
@@ -74,7 +74,7 @@ export function ContentArea() {
 
   if (!chatExpanded) {
     return (
-      <div className="flex h-full flex-col">
+      <div className="flex h-full min-w-0 flex-col overflow-hidden">
         <div className="flex-1 overflow-hidden">{editorContent}</div>
         <ChatBar />
       </div>

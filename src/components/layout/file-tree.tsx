@@ -64,7 +64,7 @@ export function FileTree() {
   }
 
   return (
-    <ScrollArea className="h-full">
+    <ScrollArea className="h-full min-w-0 overflow-hidden">
       <div className="p-2">
         <div className="mb-2 px-2 text-xs font-semibold uppercase text-muted-foreground">
           {project.name}

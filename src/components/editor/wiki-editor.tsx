@@ -40,7 +40,7 @@ interface WikiEditorProps {
 export function WikiEditor({ content, onSave }: WikiEditorProps) {
   return (
     <MilkdownProvider>
-      <div className="prose prose-invert max-w-none p-6">
+      <div className="prose prose-invert min-w-0 max-w-none overflow-hidden p-6">
         <WikiEditorInner content={content} onSave={onSave} />
       </div>
     </MilkdownProvider>
