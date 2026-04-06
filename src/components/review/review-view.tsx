@@ -1,5 +1,5 @@
 import { useCallback } from "react"
-import { deepResearch } from "@/lib/deep-research"
+import { queueResearch } from "@/lib/deep-research"
 import {
   AlertTriangle,
   Copy,
@@ -167,19 +167,14 @@ export function ReviewView() {
         resolveItem(id, action)
       }
     } else if (action === "__deep_research__" && project) {
-      // Deep Research: use web search + LLM to explore the topic
+      // Queue deep research task
       const item = items.find((i) => i.id === id)
       if (item) {
         const llmConfig = useWikiStore.getState().llmConfig
         const searchConfig = useWikiStore.getState().searchApiConfig
         const topic = item.title.replace(/^(Save to Wiki|Create|Research)[:\s]*/i, "").trim() || item.description.split("\n")[0]
-        try {
-          const result = await deepResearch(project.path, topic, llmConfig, searchConfig)
-          resolveItem(id, result.savedPath ? `Researched → ${result.savedPath}` : "Researched (no results)")
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          resolveItem(id, `Research failed: ${msg}`)
-        }
+        queueResearch(project.path, topic, llmConfig, searchConfig)
+        resolveItem(id, "Queued for research")
       } else {
         resolveItem(id, action)
       }

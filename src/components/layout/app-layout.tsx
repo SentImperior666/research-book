@@ -5,7 +5,9 @@ import { IconSidebar } from "./icon-sidebar"
 import { SidebarPanel } from "./sidebar-panel"
 import { ContentArea } from "./content-area"
 import { PreviewPanel } from "./preview-panel"
+import { ResearchPanel } from "./research-panel"
 import { ActivityPanel } from "./activity-panel"
+import { useResearchStore } from "@/stores/research-store"
 
 interface AppLayoutProps {
   onSwitchProject: () => void
@@ -14,6 +16,8 @@ interface AppLayoutProps {
 export function AppLayout({ onSwitchProject }: AppLayoutProps) {
   const project = useWikiStore((s) => s.project)
   const selectedFile = useWikiStore((s) => s.selectedFile)
+  const researchPanelOpen = useResearchStore((s) => s.panelOpen)
+  const researchTasks = useResearchStore((s) => s.tasks)
   const setFileTree = useWikiStore((s) => s.setFileTree)
   const [leftWidth, setLeftWidth] = useState(220)
   const [rightWidth, setRightWidth] = useState(400)
@@ -96,18 +100,29 @@ export function AppLayout({ onSwitchProject }: AppLayoutProps) {
           <ContentArea />
         </div>
 
-        {/* Right: File preview (shown when a file is selected) */}
-        {selectedFile && (
+        {/* Right panels */}
+        {(selectedFile || researchPanelOpen) && (
           <>
             <div
               className="w-1.5 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/30 active:bg-primary/40"
               onMouseDown={startDrag("right")}
             />
             <div
-              className="shrink-0 overflow-hidden border-l"
+              className="flex shrink-0 flex-col overflow-hidden border-l"
               style={{ width: rightWidth }}
             >
-              <PreviewPanel />
+              {/* File preview on top (if file selected) */}
+              {selectedFile && (
+                <div className={researchPanelOpen ? "flex-1 overflow-hidden border-b" : "flex-1 overflow-hidden"}>
+                  <PreviewPanel />
+                </div>
+              )}
+              {/* Research panel on bottom (if open) */}
+              {researchPanelOpen && (
+                <div className={selectedFile ? "h-1/2 shrink-0 overflow-hidden" : "flex-1 overflow-hidden"}>
+                  <ResearchPanel />
+                </div>
+              )}
             </div>
           </>
         )}
