@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { Bot, User, FileText, Paperclip, BookmarkPlus } from "lucide-react"
+import { Bot, User, FileText, BookmarkPlus } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile, writeFile, listDirectory } from "@/commands/fs"
+import { lastQueryPages } from "@/components/chat/chat-panel"
 import type { DisplayMessage } from "@/stores/chat-store"
 import type { FileNode } from "@/types/wiki"
 
@@ -186,65 +187,72 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
   )
 }
 
+interface CitedPage {
+  title: string
+  path: string
+}
+
 function SourceFilesBar({ content }: { content: string }) {
-  // Ensure source files are loaded
   const project = useWikiStore((s) => s.project)
-  const fileTree = useWikiStore((s) => s.fileTree)
+  const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
 
-  useEffect(() => {
-    if (!project) return
-    listDirectory(`${project.path}/raw/sources`)
-      .then((tree) => { cachedSourceFiles = flattenNames(tree) })
-      .catch(() => {})
-  }, [project, fileTree])
+  const citedPages = useMemo(() => extractCitedPages(content), [content])
 
-  const cited = useMemo(() => extractCitedSources(content), [content, fileTree])
-
-  if (cited.length === 0) return null
+  if (citedPages.length === 0) return null
 
   return (
     <div className="flex flex-wrap items-center gap-1 px-1">
       <span className="text-[10px] text-muted-foreground">Sources:</span>
-      {cited.map((fileName) => (
-        <SourceRef key={fileName} fileName={fileName} />
+      {citedPages.map((page) => (
+        <button
+          key={page.path}
+          type="button"
+          onClick={() => {
+            if (project) {
+              const fullPath = page.path.startsWith("/") ? page.path : `${project.path}/${page.path}`
+              setSelectedFile(fullPath)
+            }
+          }}
+          className="inline-flex items-center gap-0.5 rounded bg-accent/50 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-accent transition-colors"
+          title={page.path}
+        >
+          <FileText className="h-3 w-3" />
+          {page.title}
+        </button>
       ))}
     </div>
   )
 }
 
 /**
- * Extract cited source files from the hidden comment at the end of the response.
- * Format: <!-- sources: file1.pdf, file2.md -->
- * Only shows files explicitly cited by the LLM. Returns empty if none cited.
+ * Extract cited wiki pages from the hidden <!-- cited: 1, 3, 5 --> comment.
+ * Maps page numbers back to the pages that were sent to the LLM.
  */
-function extractCitedSources(text: string): string[] {
-  // Try to parse the hidden comment
-  const commentMatch = text.match(/<!--\s*sources:\s*(.+?)\s*-->/)
-  if (commentMatch) {
-    // LLM cited specific files — validate they exist
-    const cited = commentMatch[1]
+function extractCitedPages(text: string): CitedPage[] {
+  const citedMatch = text.match(/<!--\s*cited:\s*(.+?)\s*-->/)
+  if (citedMatch && lastQueryPages.length > 0) {
+    const numbers = citedMatch[1]
       .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && cachedSourceFiles.includes(s))
-    if (cited.length > 0) return cited
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n) && n >= 1 && n <= lastQueryPages.length)
 
-    // LLM cited files but names don't match exactly — try fuzzy match
-    const rawCited = commentMatch[1].split(",").map((s) => s.trim()).filter((s) => s.length > 0)
-    const fuzzy = rawCited.flatMap((cited) => {
-      const lower = cited.toLowerCase()
-      return cachedSourceFiles.filter((f) =>
-        f.toLowerCase().includes(lower) || lower.includes(f.toLowerCase().replace(/\.[^.]+$/, ""))
-      )
-    })
-    const unique = [...new Set(fuzzy)]
-    if (unique.length > 0) return unique
+    const pages = numbers.map((n) => lastQueryPages[n - 1])
+    if (pages.length > 0) return pages
   }
 
-  // Fallback: check which known source filenames appear in the text
-  const mentioned = cachedSourceFiles.filter((name) => text.includes(name))
-  if (mentioned.length > 0) return mentioned
+  // Fallback: if LLM used [1], [2] notation in text, try to match those
+  if (lastQueryPages.length > 0) {
+    const numberRefs = text.match(/\[(\d+)\]/g)
+    if (numberRefs) {
+      const numbers = [...new Set(numberRefs.map((r) => parseInt(r.slice(1, -1), 10)))]
+        .filter((n) => n >= 1 && n <= lastQueryPages.length)
+      if (numbers.length > 0) {
+        return numbers.map((n) => lastQueryPages[n - 1])
+      }
+    }
+  }
 
-  // No sources identified — return empty (don't show all)
+  // No citations found
   return []
 }
 

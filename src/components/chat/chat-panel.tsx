@@ -12,6 +12,9 @@ import { searchWiki } from "@/lib/search"
 import { useReviewStore } from "@/stores/review-store"
 import type { FileNode } from "@/types/wiki"
 
+// Store the page mapping from the last query so SourceFilesBar can show which pages were cited
+export let lastQueryPages: { title: string; path: string }[] = []
+
 export function ChatPanel() {
   useSourceFiles() // Keep source file cache warm
   const messages = useChatStore((s) => s.messages)
@@ -81,12 +84,17 @@ export function ChatPanel() {
           }
         }
 
-        // Build the wiki context with actual page content
+        // Build numbered wiki context so AI can cite by number
         const pagesContext = relevantPages.length > 0
-          ? relevantPages.map((p) =>
-              `### ${p.title} (${p.path})\n\n${p.content}`
+          ? relevantPages.map((p, i) =>
+              `### [${i + 1}] ${p.title}\nPath: ${p.path}\n\n${p.content}`
             ).join("\n\n---\n\n")
           : "(No wiki pages found)"
+
+        // Build page list for reference
+        const pageList = relevantPages.map((p, i) =>
+          `[${i + 1}] ${p.title} (${p.path})`
+        ).join("\n")
 
         systemMessages.push({
           role: "system",
@@ -94,22 +102,29 @@ export function ChatPanel() {
             "You are a knowledgeable wiki assistant. Answer questions based on the wiki content provided below.",
             "",
             "## Rules",
-            "- Answer based ONLY on the wiki page content provided below.",
+            "- Answer based ONLY on the numbered wiki pages provided below.",
             "- If the provided pages don't contain enough information, say so honestly.",
-            "- Use [[wikilink]] syntax to reference wiki pages you cite.",
+            "- Use [[wikilink]] syntax to reference wiki pages.",
+            "- When citing information, use the page number in brackets, e.g. [1], [2].",
+            "- At the VERY END of your response, add a hidden comment listing which page numbers you used:",
+            "  <!-- cited: 1, 3, 5 -->",
             "",
             "## Save Judgment",
-            "- If your answer contains a valuable synthesis, comparison, analysis, or new insight worth preserving, add this at the VERY END:",
+            "- If your answer contains a valuable synthesis, comparison, analysis, or new insight worth preserving, add BEFORE the cited comment:",
             "  <!-- save-worthy: yes | Brief reason -->",
-            "- Only for genuinely valuable answers (cross-source comparisons, synthesis, novel connections). NOT for simple lookups.",
+            "- Only for genuinely valuable answers. NOT for simple lookups.",
             "",
             "Use markdown formatting for clarity.",
             "",
             purpose ? `## Wiki Purpose\n${purpose}` : "",
             index ? `## Wiki Index\n${index}` : "",
-            `## Relevant Wiki Pages (use these to answer)\n\n${pagesContext}`,
+            relevantPages.length > 0 ? `## Page List\n${pageList}` : "",
+            `## Wiki Pages\n\n${pagesContext}`,
           ].filter(Boolean).join("\n"),
         })
+
+        // Store page mapping for SourceFilesBar to use
+        lastQueryPages = relevantPages.map((p) => ({ title: p.title, path: p.path }))
       }
 
       // Only include user and assistant messages in conversation history (not internal system messages)
