@@ -88,8 +88,9 @@ export function ChatPanel() {
         graphExpansions.sort((a, b) => b.relevance - a.relevance)
 
         // --- Phase 3 & 4: Budget control with priority queue ---
-        const TOTAL_BUDGET = 30_000
-        const MAX_PAGE_SIZE = 8_000
+        // Use ~60% of max context for page content, rest for prompt + history + response
+        const TOTAL_BUDGET = Math.floor(llmConfig.maxContextSize * 0.6)
+        const MAX_PAGE_SIZE = Math.min(Math.floor(TOTAL_BUDGET * 0.3), 30_000)
         let usedChars = 0
 
         type PageEntry = { title: string; path: string; content: string; priority: number }

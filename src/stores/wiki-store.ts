@@ -7,6 +7,7 @@ interface LlmConfig {
   model: string
   ollamaUrl: string
   customEndpoint: string
+  maxContextSize: number // max context window in characters
 }
 
 interface SearchApiConfig {
@@ -46,6 +47,7 @@ export const useWikiStore = create<WikiState>((set) => ({
   llmConfig: {
     provider: "openai",
     apiKey: "",
+    maxContextSize: 204800,
     model: "",
     ollamaUrl: "http://localhost:11434",
     customEndpoint: "",
