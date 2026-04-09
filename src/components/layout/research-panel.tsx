@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
@@ -160,7 +161,7 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
           </div>
         )}
         {answer && (
-          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
             {answer}
           </ReactMarkdown>
         )}
