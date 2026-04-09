@@ -138,9 +138,10 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
 
     case "google":
       return {
-        url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
+        url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
         headers: {
           "Content-Type": JSON_CONTENT_TYPE,
+          "x-goog-api-key": apiKey,
         },
         buildBody: buildGoogleBody,
         parseStream: parseGoogleLine,
