@@ -1,5 +1,9 @@
 import { convertFileSrc } from "@tauri-apps/api/core"
-import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import remarkMath from "remark-math"
+import rehypeKatex from "rehype-katex"
+import "katex/dist/katex.min.css"
 import {
   FileText,
   Image as ImageIcon,
@@ -113,7 +117,30 @@ function TextPreview({ filePath, content, label }: { filePath: string; content: 
         <span>{filePath}</span>
         <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase">{label}</span>
       </div>
-      <pre className="whitespace-pre-wrap font-mono text-sm">{convertLatexToUnicode(content)}</pre>
+      <div className="prose prose-sm max-w-none dark:prose-invert">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+          components={{
+            table: ({ children, ...props }) => (
+              <div className="my-2 overflow-x-auto rounded border border-border">
+                <table className="w-full border-collapse text-xs" {...props}>{children}</table>
+              </div>
+            ),
+            thead: ({ children, ...props }) => (
+              <thead className="bg-muted" {...props}>{children}</thead>
+            ),
+            th: ({ children, ...props }) => (
+              <th className="border border-border/80 px-3 py-1.5 text-left font-semibold bg-muted" {...props}>{children}</th>
+            ),
+            td: ({ children, ...props }) => (
+              <td className="border border-border/60 px-3 py-1.5" {...props}>{children}</td>
+            ),
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
     </div>
   )
 }
