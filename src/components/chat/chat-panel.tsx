@@ -13,6 +13,7 @@ import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { useReviewStore } from "@/stores/review-store"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
+import { detectLanguage } from "@/lib/detect-language"
 
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
 export let lastQueryPages: { title: string; path: string }[] = []
@@ -287,8 +288,8 @@ export function ChatPanel() {
           content: [
             "You are a knowledgeable wiki assistant. Answer questions based on the wiki content provided below.",
             "",
-            "## Language Rule",
-            "- ALWAYS respond in the same language the user uses. If the user writes in Chinese, respond in Chinese. If in English, respond in English. Match the user's language exactly.",
+            `## CRITICAL: Response Language`,
+            `The user is writing in **${detectLanguage(text)}**. You MUST respond in **${detectLanguage(text)}** regardless of what language the wiki content is written in. This is a mandatory requirement.`,
             "",
             "## Rules",
             "- Answer based ONLY on the numbered wiki pages provided below.",
