@@ -27,6 +27,8 @@ interface ReviewState {
   resolveItem: (id: string, action: string) => void
   dismissItem: (id: string) => void
   clearResolved: () => void
+  /** Wipe every review item (e.g. on project switch). */
+  clear: () => void
 }
 
 let counter = 0
@@ -78,4 +80,6 @@ export const useReviewStore = create<ReviewState>((set) => ({
     set((state) => ({
       items: state.items.filter((item) => !item.resolved),
     })),
+
+  clear: () => set({ items: [] }),
 }))

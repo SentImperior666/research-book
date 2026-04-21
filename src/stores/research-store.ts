@@ -24,6 +24,8 @@ interface ResearchState {
   setPanelOpen: (open: boolean) => void
   getRunningCount: () => number
   getNextQueued: () => ResearchTask | undefined
+  /** Wipe every task (e.g. on project switch). Also closes the panel. */
+  clear: () => void
 }
 
 let counter = 0
@@ -77,4 +79,6 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
     const { tasks } = get()
     return tasks.find((t) => t.status === "queued")
   },
+
+  clear: () => set({ tasks: [], panelOpen: false }),
 }))

@@ -4,11 +4,15 @@ import i18n from "@/i18n"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useChatStore } from "@/stores/chat-store"
+import { useResearchStore } from "@/stores/research-store"
+import { useActivityStore } from "@/stores/activity-store"
+import { useLintStore } from "@/stores/lint-store"
 import { listDirectory, openProject } from "@/commands/fs"
 import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig } from "@/lib/project-store"
 import { loadReviewItems, loadChatHistory } from "@/lib/persist"
 import { setupAutoSave } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
+import { startApiServer } from "@/lib/api-server"
 import { AppLayout } from "@/components/layout/app-layout"
 import { WelcomeScreen } from "@/components/project/welcome-screen"
 import { CreateProjectDialog } from "@/components/project/create-project-dialog"
@@ -23,10 +27,13 @@ function App() {
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [loading, setLoading] = useState(true)
 
-  // Set up auto-save and clip watcher once on mount
+  // Set up auto-save, clip watcher, and the MCP-bridge dispatcher once on mount
   useEffect(() => {
     setupAutoSave()
     startClipWatcher()
+    startApiServer().catch((err) => {
+      console.error("Failed to start MCP API dispatcher:", err)
+    })
   }, [])
 
   // Auto-open last project on startup
@@ -68,6 +75,17 @@ function App() {
   }, [])
 
   async function handleProjectOpened(proj: WikiProject) {
+    // Wipe every per-project store BEFORE we flip `project`, so nothing from
+    // the previous wiki lingers in memory (review suggestions, saved chats,
+    // research tasks, activity feed, last lint run). Without this, the
+    // auto-save subscriber would happily write the old project's items into
+    // the newly opened project's `.llm-wiki/` folder.
+    useReviewStore.getState().clear()
+    useChatStore.getState().clear()
+    useResearchStore.getState().clear()
+    useActivityStore.getState().clear()
+    useLintStore.getState().clear()
+
     setProject(proj)
     setSelectedFile(null)
     setActiveView("wiki")
@@ -101,29 +119,27 @@ function App() {
     } catch (err) {
       console.error("Failed to load file tree:", err)
     }
-    // Load persisted review items
+    // Load persisted review items. Always call setItems — even with an empty
+    // array — so the store reflects this project's state exactly and doesn't
+    // keep whatever happened to be there before.
     try {
       const savedReview = await loadReviewItems(proj.path)
-      if (savedReview.length > 0) {
-        useReviewStore.getState().setItems(savedReview)
-      }
+      useReviewStore.getState().setItems(savedReview)
     } catch {
-      // ignore, start fresh
+      useReviewStore.getState().setItems([])
     }
-    // Load persisted chat history
+    // Load persisted chat history. Same invariant: always replace, never
+    // "skip on empty". Also pick a sensible active conversation (or null).
     try {
       const savedChat = await loadChatHistory(proj.path)
-      if (savedChat.conversations.length > 0) {
-        useChatStore.getState().setConversations(savedChat.conversations)
-        useChatStore.getState().setMessages(savedChat.messages)
-        // Set most recent conversation as active
-        const sorted = [...savedChat.conversations].sort((a, b) => b.updatedAt - a.updatedAt)
-        if (sorted[0]) {
-          useChatStore.getState().setActiveConversation(sorted[0].id)
-        }
-      }
+      useChatStore.getState().setConversations(savedChat.conversations)
+      useChatStore.getState().setMessages(savedChat.messages)
+      const sorted = [...savedChat.conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+      useChatStore.getState().setActiveConversation(sorted[0]?.id ?? null)
     } catch {
-      // ignore, start fresh
+      useChatStore.getState().setConversations([])
+      useChatStore.getState().setMessages([])
+      useChatStore.getState().setActiveConversation(null)
     }
   }
 
@@ -152,9 +168,18 @@ function App() {
   }
 
   function handleSwitchProject() {
+    // Going back to the welcome screen: drop the project AND every store that
+    // holds project-scoped data, otherwise the next project we open can flash
+    // the previous project's reviews/chats/research/etc. before load finishes
+    // (and auto-save would then persist the stale data into the new project).
     setProject(null)
     setFileTree([])
     setSelectedFile(null)
+    useReviewStore.getState().clear()
+    useChatStore.getState().clear()
+    useResearchStore.getState().clear()
+    useActivityStore.getState().clear()
+    useLintStore.getState().clear()
   }
 
   if (loading) {

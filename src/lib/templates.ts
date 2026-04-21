@@ -652,3 +652,44 @@ export function getTemplate(id: string): WikiTemplate {
   }
   return found
 }
+
+/**
+ * Apply a template's content to a project that has already been scaffolded by
+ * `create_project` (Rust). Writes `schema.md`, `purpose.md`, and creates any
+ * extra directories defined by the template.
+ *
+ * Both the GUI's CreateProjectDialog and the MCP `create_project` tool funnel
+ * through this so the two paths produce identical projects.
+ */
+export async function applyTemplate(
+  projectPath: string,
+  templateId: string,
+): Promise<void> {
+  const { writeFile, createDirectory } = await import("@/commands/fs")
+  const { normalizePath } = await import("@/lib/path-utils")
+  const pp = normalizePath(projectPath)
+  const template = getTemplate(templateId)
+
+  await writeFile(`${pp}/schema.md`, template.schema)
+  await writeFile(`${pp}/purpose.md`, template.purpose)
+  for (const dir of template.extraDirs) {
+    await createDirectory(`${pp}/${dir}`).catch(() => {})
+  }
+}
+
+/** Lightweight summary used by the MCP `list_templates` tool. */
+export function listTemplateSummaries(): Array<{
+  id: string
+  name: string
+  description: string
+  icon: string
+  extraDirs: string[]
+}> {
+  return templates.map((t) => ({
+    id: t.id,
+    name: t.name,
+    description: t.description,
+    icon: t.icon,
+    extraDirs: t.extraDirs,
+  }))
+}

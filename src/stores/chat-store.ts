@@ -6,6 +6,12 @@ export interface Conversation {
   title: string
   createdAt: number
   updatedAt: number
+  /**
+   * Origin of the conversation. Conversations created by an MCP agent are
+   * tagged `"mcp"` so the GUI can filter / visually distinguish them from
+   * conversations the human started.
+   */
+  source?: "gui" | "mcp"
 }
 
 export interface MessageReference {
@@ -50,6 +56,13 @@ interface ChatState {
   clearMessages: () => void
   setMaxHistoryMessages: (n: number) => void
   removeLastAssistantMessage: () => void  // for regenerate: remove last assistant reply
+  /**
+   * Wipe every conversation, message, and in-flight stream state.
+   * Used on project switch so we don't leak chat from a different wiki.
+   * `maxHistoryMessages` is preserved because it is a user preference, not
+   * per-project data.
+   */
+  clear: () => void
 
   // Helpers
   getActiveMessages: () => DisplayMessage[]
@@ -225,6 +238,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!activeConversationId) return []
     return messages.filter((m) => m.conversationId === activeConversationId)
   },
+
+  clear: () =>
+    set({
+      conversations: [],
+      messages: [],
+      activeConversationId: null,
+      isStreaming: false,
+      streamingContent: "",
+      mode: "chat",
+      ingestSource: null,
+    }),
 }))
 
 export function chatMessagesToLLM(messages: DisplayMessage[]): ChatMessage[] {

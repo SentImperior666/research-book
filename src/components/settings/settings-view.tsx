@@ -56,12 +56,24 @@ export function SettingsView() {
     setModel(llmConfig.model)
     setOllamaUrl(llmConfig.ollamaUrl)
     setCustomEndpoint(llmConfig.customEndpoint)
+    setMaxContextSize(llmConfig.maxContextSize ?? 204800)
   }, [llmConfig])
 
   useEffect(() => {
     setSearchProvider(searchApiConfig.provider)
     setSearchApiKey(searchApiConfig.apiKey)
   }, [searchApiConfig])
+
+  // Re-sync local state when the store changes from outside this component
+  // (e.g. an MCP/CLI agent calling POST /api/config/embedding while the panel
+  // is open). Without this, the form keeps showing stale values and a
+  // subsequent "Save" would silently overwrite the agent's update.
+  useEffect(() => {
+    setEmbeddingEnabled(embeddingConfig.enabled)
+    setEmbeddingEndpoint(embeddingConfig.endpoint)
+    setEmbeddingApiKey(embeddingConfig.apiKey)
+    setEmbeddingModel(embeddingConfig.model)
+  }, [embeddingConfig])
 
   const currentProvider = PROVIDERS.find((p) => p.value === provider)
 

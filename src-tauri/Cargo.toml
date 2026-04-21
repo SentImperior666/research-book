@@ -36,6 +36,10 @@ lancedb = "0.27.2"
 arrow-array = "57"
 arrow-schema = "57"
 futures = "0.3"
+once_cell = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+dirs = "5"
 
 [profile.release]
 codegen-units = 1

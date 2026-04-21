@@ -3,7 +3,7 @@ import { streamChat } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 import { useActivityStore } from "@/stores/activity-store"
-import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
+import { getRelativePath, normalizePath } from "@/lib/path-utils"
 
 export interface LintResult {
   type: "orphan" | "broken-link" | "no-outlinks" | "semantic"
@@ -42,20 +42,116 @@ function relativeToSlug(relativePath: string): string {
   return relativePath.replace(/\.md$/, "")
 }
 
-/** Build a slug → absolute path map from wiki files */
-function buildSlugMap(
+/**
+ * Normalize a wikilink target or page identifier into a stable lookup key.
+ *
+ * Lowercases, strips file extension and anchor (`Page#Section`), collapses any
+ * non-alphanumeric run into a single "-", and trims edge dashes. This lets us
+ * resolve all of these to the same page:
+ *   - `overview`            (filename slug)
+ *   - `Project Overview`    (title, as the LLM tends to write it)
+ *   - `project-overview`    (kebab title)
+ *   - `Project_Overview`    (Obsidian style)
+ *   - `Overview#Goals`      (with section anchor)
+ */
+function normalizeKey(value: string): string {
+  return value
+    .replace(/#.*$/, "") // drop section anchor
+    .replace(/\.md$/i, "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/**
+ * Collect all human-readable titles a markdown page is known by, in priority
+ * order: YAML `title:` frontmatter first, then the first H1. Both are aliased
+ * onto the page in the slug index so links can resolve by either form.
+ *
+ * Why both? The default `wiki/overview.md` template has `title: Project
+ * Overview` in frontmatter but `# Overview` as its H1. The LLM (and humans)
+ * naturally write `[[Project Overview]]`, which would otherwise be flagged
+ * broken even though the page is right there.
+ */
+function extractTitles(content: string): string[] {
+  const titles: string[] = []
+
+  // YAML frontmatter `title:` (quoted or bare).
+  if (content.startsWith("---")) {
+    const end = content.indexOf("\n---", 3)
+    if (end !== -1) {
+      const frontmatter = content.slice(3, end)
+      const titleMatch = frontmatter.match(/^\s*title\s*:\s*(.+?)\s*$/m)
+      if (titleMatch) {
+        const raw = titleMatch[1].replace(/^["'](.*)["']$/, "$1").trim()
+        if (raw) titles.push(raw)
+      }
+    }
+  }
+
+  // First H1 of the body (skip past frontmatter so a stray `# foo` in YAML
+  // doesn't win).
+  let body = content
+  if (body.startsWith("---")) {
+    const end = body.indexOf("\n---", 3)
+    if (end !== -1) body = body.slice(end + 4)
+  }
+  const h1 = body.match(/^\s*#\s+(.+?)\s*$/m)
+  if (h1) titles.push(h1[1].trim())
+
+  return titles
+}
+
+interface SlugIndex {
+  /** All known keys → absolute file path. */
+  byKey: Map<string, string>
+  /** Absolute file path → canonical relative slug (used for inbound counts). */
+  pathToSlug: Map<string, string>
+}
+
+/**
+ * Build a forgiving lookup map from many name shapes → wiki page path. Any of
+ * relative path, filename, page title, or kebab forms thereof will resolve to
+ * the same file.
+ */
+async function buildSlugIndex(
   wikiFiles: FileNode[],
   wikiRoot: string,
-): Map<string, string> {
-  const map = new Map<string, string>()
-  for (const f of wikiFiles) {
-    // e.g. /path/to/project/wiki/entities/foo.md → entities/foo
-    const rel = getRelativePath(f.path, wikiRoot).replace(/\.md$/, "")
-    map.set(rel, f.path)
-    // also index by basename without extension
-    map.set(f.name.replace(/\.md$/, ""), f.path)
+): Promise<SlugIndex> {
+  const byKey = new Map<string, string>()
+  const pathToSlug = new Map<string, string>()
+
+  const register = (raw: string, abs: string) => {
+    const key = normalizeKey(raw)
+    if (!key) return
+    // First writer wins so a more "canonical" name (relative path) takes
+    // precedence over later aliases (basename, title) on collision.
+    if (!byKey.has(key)) byKey.set(key, abs)
   }
-  return map
+
+  for (const f of wikiFiles) {
+    const relPath = getRelativePath(f.path, wikiRoot)
+    const slug = relPath.replace(/\.md$/, "")
+    pathToSlug.set(f.path, slug)
+
+    // Path-based aliases.
+    register(slug, f.path)
+    register(f.name, f.path)
+    register(f.name.replace(/\.md$/, ""), f.path)
+
+    // Title-based aliases (frontmatter `title:` and first H1). Best-effort —
+    // missing/unreadable files just get fewer aliases and still resolve via
+    // filename.
+    try {
+      const content = await readFile(f.path)
+      for (const title of extractTitles(content)) register(title, f.path)
+    } catch {
+      // ignore — page just won't be resolvable by title.
+    }
+  }
+
+  return { byKey, pathToSlug }
 }
 
 // ── Structural lint ───────────────────────────────────────────────────────────
@@ -75,7 +171,9 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
     (f) => f.name !== "index.md" && f.name !== "log.md"
   )
 
-  const slugMap = buildSlugMap(contentFiles, wikiRoot)
+  // Index ALL wiki files (including index/log) so links to them resolve, but
+  // only consider `contentFiles` for orphan/no-outlink reports below.
+  const slugIndex = await buildSlugIndex(wikiFiles, wikiRoot)
 
   // Read all content files
   type PageData = { path: string; slug: string; content: string; outlinks: string[] }
@@ -92,14 +190,16 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
     }
   }
 
-  // Build inbound link count
+  // Build inbound link count keyed by canonical slug. Self-links don't count
+  // toward inbound — a page that only links to itself is still an orphan.
   const inboundCounts = new Map<string, number>()
   for (const p of pages) {
     for (const link of p.outlinks) {
-      const target = slugMap.has(link)
-        ? relativeToSlug(getRelativePath(slugMap.get(link)!, wikiRoot))
-        : link
-      inboundCounts.set(target, (inboundCounts.get(target) ?? 0) + 1)
+      const targetPath = slugIndex.byKey.get(normalizeKey(link))
+      if (!targetPath || targetPath === p.path) continue
+      const targetSlug = slugIndex.pathToSlug.get(targetPath)
+      if (!targetSlug) continue
+      inboundCounts.set(targetSlug, (inboundCounts.get(targetSlug) ?? 0) + 1)
     }
   }
 
@@ -129,9 +229,10 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
       })
     }
 
-    // Broken links
+    // Broken links — resolve through the forgiving index (path slug, basename,
+    // page title, kebab/title variants, with `#anchor` stripped).
     for (const link of p.outlinks) {
-      const exists = slugMap.has(link) || slugMap.has(getFileName(link).replace(/\.md$/, ""))
+      const exists = slugIndex.byKey.has(normalizeKey(link))
       if (!exists) {
         results.push({
           type: "broken-link",

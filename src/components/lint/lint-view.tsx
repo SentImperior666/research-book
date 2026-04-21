@@ -10,10 +10,12 @@ import {
   BrainCircuit,
   Wrench,
   Trash2,
+  Bot,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
+import { useLintStore } from "@/stores/lint-store"
 import { runStructuralLint, runSemanticLint, type LintResult } from "@/lib/lint"
 import { readFile, writeFile, deleteFile, listDirectory } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
@@ -34,34 +36,56 @@ export function LintView() {
   const setFileTree = useWikiStore((s) => s.setFileTree)
   const bumpDataVersion = useWikiStore((s) => s.bumpDataVersion)
 
-  const [results, setResults] = useState<LintResult[]>([])
-  const [running, setRunning] = useState(false)
-  const [hasRun, setHasRun] = useState(false)
+  const lastRun = useLintStore((s) => s.lastRun)
+  const running = useLintStore((s) => s.running)
+  const beginRun = useLintStore((s) => s.beginRun)
+  const setRunResults = useLintStore((s) => s.setResults)
+  const removeAt = useLintStore((s) => s.removeAt)
+
+  // Only display results that belong to the currently open project so
+  // switching projects doesn't surface stale lint from a different wiki.
+  const projectPath = project ? normalizePath(project.path) : null
+  const activeRun = lastRun && projectPath && lastRun.projectPath === projectPath ? lastRun : null
+  const results = activeRun?.results ?? []
+  const hasRun = activeRun !== null
+  const lastSource = activeRun?.source ?? null
+
   const [runSemantic, setRunSemantic] = useState(false)
   const [fixingId, setFixingId] = useState<string | null>(null)
 
   const handleRunLint = useCallback(async () => {
     if (!project || running) return
     const pp = normalizePath(project.path)
-    setRunning(true)
-    setResults([])
+    beginRun("gui")
     try {
       const structural = await runStructuralLint(pp)
       let all = structural
+      const includeSemantic =
+        runSemantic && (llmConfig.apiKey || llmConfig.provider === "ollama")
 
-      if (runSemantic && (llmConfig.apiKey || llmConfig.provider === "ollama")) {
+      if (includeSemantic) {
         const semantic = await runSemanticLint(pp, llmConfig)
         all = [...structural, ...semantic]
       }
 
-      setResults(all)
-      setHasRun(true)
+      setRunResults({
+        results: all,
+        semantic: includeSemantic,
+        source: "gui",
+        projectPath: pp,
+        finishedAt: Date.now(),
+      })
     } catch (err) {
       console.error("Lint failed:", err)
-    } finally {
-      setRunning(false)
+      setRunResults({
+        results: [],
+        semantic: runSemantic,
+        source: "gui",
+        projectPath: pp,
+        finishedAt: Date.now(),
+      })
     }
-  }, [project, llmConfig, running, runSemantic])
+  }, [project, llmConfig, running, runSemantic, beginRun, setRunResults])
 
   async function handleOpenPage(page: string) {
     if (!project) return
@@ -106,7 +130,7 @@ export function LintView() {
             await writeFile(indexPath, indexContent)
           }
           // Remove from results
-          setResults((prev) => prev.filter((_, i) => i !== index))
+          removeAt(index)
           break
         }
 
@@ -124,7 +148,7 @@ export function LintView() {
               { label: "Skip", action: "Skip" },
             ],
           })
-          setResults((prev) => prev.filter((_, i) => i !== index))
+          removeAt(index)
           break
         }
 
@@ -140,7 +164,7 @@ export function LintView() {
               { label: "Skip", action: "Skip" },
             ],
           })
-          setResults((prev) => prev.filter((_, i) => i !== index))
+          removeAt(index)
           break
         }
 
@@ -156,7 +180,7 @@ export function LintView() {
               { label: "Skip", action: "Skip" },
             ],
           })
-          setResults((prev) => prev.filter((_, i) => i !== index))
+          removeAt(index)
           break
         }
       }
@@ -181,7 +205,7 @@ export function LintView() {
 
     try {
       await deleteFile(pagePath)
-      setResults((prev) => prev.filter((_, i) => i !== index))
+      removeAt(index)
       const tree = await listDirectory(pp)
       setFileTree(tree)
       bumpDataVersion()
@@ -201,6 +225,15 @@ export function LintView() {
           {hasRun && results.length > 0 && (
             <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
               {results.length} issue{results.length !== 1 ? "s" : ""}
+            </span>
+          )}
+          {lastSource === "mcp" && (
+            <span
+              title="Last lint run was triggered by an MCP/CLI agent"
+              className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-medium text-violet-600 dark:text-violet-400"
+            >
+              <Bot className="h-3 w-3" />
+              MCP
             </span>
           )}
         </div>

@@ -1,3 +1,4 @@
+mod api;
 mod clip_server;
 mod commands;
 mod types;
@@ -7,14 +8,24 @@ fn clip_server_status() -> String {
     clip_server::get_daemon_status().to_string()
 }
 
+#[tauri::command]
+fn api_token() -> Result<String, String> {
+    api::auth::get_or_create_token()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    clip_server::start_clip_server();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .setup(|app| {
+            // Start the local HTTP daemon (clip server + /api bridge) once the
+            // app handle is available so the renderer-bridge listeners can be
+            // installed against the live event bus.
+            clip_server::start_clip_server(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::fs::read_file,
             commands::fs::write_file,
@@ -28,6 +39,7 @@ pub fn run() {
             commands::project::create_project,
             commands::project::open_project,
             clip_server_status,
+            api_token,
             commands::vectorstore::vector_upsert,
             commands::vectorstore::vector_search,
             commands::vectorstore::vector_delete,

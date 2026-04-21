@@ -1,7 +1,10 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
+use tauri::AppHandle;
 use tiny_http::{Header, Method, Response, Server};
+
+use crate::api;
 
 static CURRENT_PROJECT: Mutex<String> = Mutex::new(String::new());
 static ALL_PROJECTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (name, path)
@@ -26,8 +29,32 @@ pub fn get_daemon_status() -> &'static str {
     }
 }
 
-pub fn start_clip_server() {
-    thread::spawn(|| {
+/// Snapshot of the active project path, if any has been set.
+///
+/// Both the GUI (`App.tsx::handleProjectOpened`) and the MCP renderer
+/// (`api-server.ts::selectProjectInRenderer`) POST to `/project` whenever the
+/// active project changes, so this is a reliable mirror of the renderer's
+/// `useWikiStore.project.path`.
+pub fn get_current_project() -> Option<String> {
+    match CURRENT_PROJECT.lock() {
+        Ok(guard) if !guard.is_empty() => Some(guard.clone()),
+        _ => None,
+    }
+}
+
+pub fn start_clip_server(app: AppHandle) {
+    // Install bridge listeners on the main thread before spawning the HTTP loop
+    // so requests that arrive immediately after bind don't race the listener
+    // setup.
+    api::bridge::install_reply_listener(&app);
+    api::sse::install_progress_listener(&app);
+
+    // Pre-warm the API token (best-effort; logged on failure but non-fatal).
+    if let Err(e) = api::auth::get_or_create_token() {
+        eprintln!("[Clip Server] Failed to initialize API token: {e}");
+    }
+
+    thread::spawn(move || {
         let mut restart_count: u32 = 0;
 
         loop {
@@ -70,153 +97,20 @@ pub fn start_clip_server() {
             restart_count = 0; // Reset on successful bind
             println!("[Clip Server] Listening on http://127.0.0.1:{}", PORT);
 
-        for mut request in server.incoming_requests() {
-            let cors_headers = vec![
-                Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
-                Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap(),
-                Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap(),
-                Header::from_bytes("Content-Type", "application/json").unwrap(),
-            ];
-
-            // Handle CORS preflight
-            if request.method() == &Method::Options {
-                let mut response = Response::from_string("").with_status_code(204);
-                for h in &cors_headers {
-                    response.add_header(h.clone());
-                }
-                let _ = request.respond(response);
-                continue;
+            // Process each request on its own thread. The previous serial
+            // loop (`for request in server.incoming_requests()` calling
+            // `handle()` inline) made the daemon a bottleneck: a single
+            // long-lived SSE stream such as `/api/jobs/<id>/stream` would
+            // block every other request — including unrelated POSTs from a
+            // second CLI — until the streamed job finished. Per-request
+            // locking is supposed to be the *only* serialization point; the
+            // HTTP transport itself must stay concurrent.
+            for request in server.incoming_requests() {
+                let app_for_req = app.clone();
+                thread::spawn(move || handle_request(&app_for_req, request));
             }
 
-            let url = request.url().to_string();
-
-            match (request.method(), url.as_str()) {
-                (&Method::Get, "/status") => {
-                    let body = r#"{"ok":true,"version":"0.1.0"}"#;
-                    let mut response = Response::from_string(body);
-                    for h in &cors_headers {
-                        response.add_header(h.clone());
-                    }
-                    let _ = request.respond(response);
-                }
-                (&Method::Get, "/project") => {
-                    let path = CURRENT_PROJECT.lock().unwrap().clone();
-                    let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
-                    let mut response = Response::from_string(body);
-                    for h in &cors_headers {
-                        response.add_header(h.clone());
-                    }
-                    let _ = request.respond(response);
-                }
-                (&Method::Post, "/project") => {
-                    let mut body = String::new();
-                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
-                        let err =
-                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
-                        let mut response = Response::from_string(err).with_status_code(400);
-                        for h in &cors_headers {
-                            response.add_header(h.clone());
-                        }
-                        let _ = request.respond(response);
-                        continue;
-                    }
-
-                    let result = handle_set_project(&body);
-                    let status = if result.contains(r#""ok":true"#) {
-                        200
-                    } else {
-                        400
-                    };
-                    let mut response = Response::from_string(result).with_status_code(status);
-                    for h in &cors_headers {
-                        response.add_header(h.clone());
-                    }
-                    let _ = request.respond(response);
-                }
-                (&Method::Get, "/projects") => {
-                    let projects = ALL_PROJECTS.lock().unwrap().clone();
-                    let current = CURRENT_PROJECT.lock().unwrap().clone();
-                    let items: Vec<String> = projects.iter()
-                        .map(|(name, path)| format!(r#"{{"name":"{}","path":"{}","current":{}}}"#,
-                            name.replace('"', r#"\""#),
-                            path.replace('"', r#"\""#),
-                            path == &current))
-                        .collect();
-                    let body = format!(r#"{{"ok":true,"projects":[{}]}}"#, items.join(","));
-                    let mut response = Response::from_string(body);
-                    for h in &cors_headers { response.add_header(h.clone()); }
-                    let _ = request.respond(response);
-                }
-                (&Method::Post, "/projects") => {
-                    let mut body = String::new();
-                    if request.as_reader().read_to_string(&mut body).is_ok() {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-                            if let Some(arr) = parsed["projects"].as_array() {
-                                let mut projects = ALL_PROJECTS.lock().unwrap();
-                                projects.clear();
-                                for item in arr {
-                                    let name = item["name"].as_str().unwrap_or("").to_string();
-                                    let path = item["path"].as_str().unwrap_or("").to_string();
-                                    if !path.is_empty() {
-                                        projects.push((name, path));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let mut response = Response::from_string(r#"{"ok":true}"#);
-                    for h in &cors_headers { response.add_header(h.clone()); }
-                    let _ = request.respond(response);
-                }
-                (&Method::Get, "/clips/pending") => {
-                    let mut pending = PENDING_CLIPS.lock().unwrap();
-                    let items: Vec<String> = pending.iter()
-                        .map(|(proj, file)| format!(r#"{{"projectPath":"{}","filePath":"{}"}}"#,
-                            proj.replace('"', r#"\""#), file.replace('"', r#"\""#)))
-                        .collect();
-                    let body = format!(r#"{{"ok":true,"clips":[{}]}}"#, items.join(","));
-                    pending.clear();
-                    let mut response = Response::from_string(body);
-                    for h in &cors_headers { response.add_header(h.clone()); }
-                    let _ = request.respond(response);
-                }
-                (&Method::Post, "/clip") => {
-                    let mut body = String::new();
-                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
-                        let err =
-                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
-                        let mut response = Response::from_string(err).with_status_code(400);
-                        for h in &cors_headers {
-                            response.add_header(h.clone());
-                        }
-                        let _ = request.respond(response);
-                        continue;
-                    }
-
-                    let result = handle_clip(&body);
-                    let status = if result.contains(r#""ok":true"#) {
-                        200
-                    } else {
-                        500
-                    };
-                    let mut response = Response::from_string(result).with_status_code(status);
-                    for h in &cors_headers {
-                        response.add_header(h.clone());
-                    }
-                    let _ = request.respond(response);
-                }
-                _ => {
-                    let body = r#"{"ok":false,"error":"Not found"}"#;
-                    let mut response = Response::from_string(body).with_status_code(404);
-                    for h in &cors_headers {
-                        response.add_header(h.clone());
-                    }
-                    let _ = request.respond(response);
-                }
-            }
-        }
-
-            // Server loop exited (shouldn't happen normally)
+            // Server loop exited (shouldn't happen normally).
             DAEMON_STATUS.store(3, Ordering::Relaxed); // error
             restart_count += 1;
 
@@ -235,6 +129,167 @@ pub fn start_clip_server() {
             thread::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS));
         }
     });
+}
+
+/// Per-request handler; runs on its own thread (spawned in the accept loop).
+fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
+    // Delegate `/api/*` requests to the MCP-bridge router. It handles its own
+    // CORS / auth / body parsing and always consumes the request.
+    if api::router::matches(request.url()) {
+        api::router::handle(app, request);
+        return;
+    }
+
+    let cors_headers = vec![
+        Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+        Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap(),
+        Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap(),
+        Header::from_bytes("Content-Type", "application/json").unwrap(),
+    ];
+
+    // Handle CORS preflight.
+    if request.method() == &Method::Options {
+        let mut response = Response::from_string("").with_status_code(204);
+        for h in &cors_headers {
+            response.add_header(h.clone());
+        }
+        let _ = request.respond(response);
+        return;
+    }
+
+    let url = request.url().to_string();
+
+    match (request.method(), url.as_str()) {
+        (&Method::Get, "/status") => {
+            let body = r#"{"ok":true,"version":"0.1.0"}"#;
+            let mut response = Response::from_string(body);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Get, "/project") => {
+            let path = CURRENT_PROJECT.lock().unwrap().clone();
+            let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
+            let mut response = Response::from_string(body);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Post, "/project") => {
+            let mut body = String::new();
+            if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                let err = format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                let mut response = Response::from_string(err).with_status_code(400);
+                for h in &cors_headers {
+                    response.add_header(h.clone());
+                }
+                let _ = request.respond(response);
+                return;
+            }
+
+            let result = handle_set_project(&body);
+            let status = if result.contains(r#""ok":true"#) { 200 } else { 400 };
+            let mut response = Response::from_string(result).with_status_code(status);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Get, "/projects") => {
+            let projects = ALL_PROJECTS.lock().unwrap().clone();
+            let current = CURRENT_PROJECT.lock().unwrap().clone();
+            let items: Vec<String> = projects
+                .iter()
+                .map(|(name, path)| {
+                    format!(
+                        r#"{{"name":"{}","path":"{}","current":{}}}"#,
+                        name.replace('"', r#"\""#),
+                        path.replace('"', r#"\""#),
+                        path == &current
+                    )
+                })
+                .collect();
+            let body = format!(r#"{{"ok":true,"projects":[{}]}}"#, items.join(","));
+            let mut response = Response::from_string(body);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Post, "/projects") => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_ok() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(arr) = parsed["projects"].as_array() {
+                        let mut projects = ALL_PROJECTS.lock().unwrap();
+                        projects.clear();
+                        for item in arr {
+                            let name = item["name"].as_str().unwrap_or("").to_string();
+                            let path = item["path"].as_str().unwrap_or("").to_string();
+                            if !path.is_empty() {
+                                projects.push((name, path));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut response = Response::from_string(r#"{"ok":true}"#);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Get, "/clips/pending") => {
+            let mut pending = PENDING_CLIPS.lock().unwrap();
+            let items: Vec<String> = pending
+                .iter()
+                .map(|(proj, file)| {
+                    format!(
+                        r#"{{"projectPath":"{}","filePath":"{}"}}"#,
+                        proj.replace('"', r#"\""#),
+                        file.replace('"', r#"\""#)
+                    )
+                })
+                .collect();
+            let body = format!(r#"{{"ok":true,"clips":[{}]}}"#, items.join(","));
+            pending.clear();
+            let mut response = Response::from_string(body);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        (&Method::Post, "/clip") => {
+            let mut body = String::new();
+            if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                let err = format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                let mut response = Response::from_string(err).with_status_code(400);
+                for h in &cors_headers {
+                    response.add_header(h.clone());
+                }
+                let _ = request.respond(response);
+                return;
+            }
+
+            let result = handle_clip(&body);
+            let status = if result.contains(r#""ok":true"#) { 200 } else { 500 };
+            let mut response = Response::from_string(result).with_status_code(status);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+        _ => {
+            let body = r#"{"ok":false,"error":"Not found"}"#;
+            let mut response = Response::from_string(body).with_status_code(404);
+            for h in &cors_headers {
+                response.add_header(h.clone());
+            }
+            let _ = request.respond(response);
+        }
+    }
 }
 
 fn handle_set_project(body: &str) -> String {

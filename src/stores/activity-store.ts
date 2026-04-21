@@ -16,6 +16,8 @@ interface ActivityState {
   updateItem: (id: string, updates: Partial<Pick<ActivityItem, "status" | "detail" | "filesWritten">>) => void
   appendDetail: (id: string, text: string) => void
   clearDone: () => void
+  /** Wipe every activity entry (used on project switch). */
+  clear: () => void
 }
 
 let counter = 0
@@ -52,4 +54,6 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
     set((state) => ({
       items: state.items.filter((i) => i.status === "running"),
     })),
+
+  clear: () => set({ items: [] }),
 }))

@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from "react"
-import { BookOpen, Plus, Trash2, MessageSquare } from "lucide-react"
+import { BookOpen, Plus, Trash2, MessageSquare, Bot, User } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ChatMessage, StreamingMessage, useSourceFiles } from "./chat-message"
 import { ChatInput } from "./chat-input"
@@ -37,8 +37,16 @@ function ConversationSidebar() {
   const setActiveConversation = useChatStore((s) => s.setActiveConversation)
 
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  // Filter: "all" | "gui" | "mcp" — lets the user audit agent-only chats.
+  const [sourceFilter, setSourceFilter] = useState<"all" | "gui" | "mcp">("all")
 
-  const sorted = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sorted = [...conversations]
+    .filter((c) => {
+      if (sourceFilter === "all") return true
+      const src = c.source ?? "gui"
+      return src === sourceFilter
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt)
 
   function getMessageCount(convId: string): number {
     return messages.filter((m) => m.conversationId === convId).length
@@ -46,7 +54,7 @@ function ConversationSidebar() {
 
   return (
     <div className="flex h-full w-[200px] flex-shrink-0 flex-col border-r bg-muted/30">
-      <div className="border-b p-2">
+      <div className="border-b p-2 space-y-2">
         <Button
           variant="outline"
           size="sm"
@@ -56,6 +64,37 @@ function ConversationSidebar() {
           <Plus className="h-3.5 w-3.5" />
           New Chat
         </Button>
+        <div className="flex gap-1" role="group" aria-label="Filter conversations by source">
+          <Button
+            variant={sourceFilter === "all" ? "default" : "ghost"}
+            size="sm"
+            className="h-6 flex-1 px-1.5 text-[10px]"
+            onClick={() => setSourceFilter("all")}
+            title="All conversations"
+          >
+            All
+          </Button>
+          <Button
+            variant={sourceFilter === "gui" ? "default" : "ghost"}
+            size="sm"
+            className="h-6 flex-1 gap-1 px-1.5 text-[10px]"
+            onClick={() => setSourceFilter("gui")}
+            title="Only conversations started in the GUI"
+          >
+            <User className="h-3 w-3" />
+            You
+          </Button>
+          <Button
+            variant={sourceFilter === "mcp" ? "default" : "ghost"}
+            size="sm"
+            className="h-6 flex-1 gap-1 px-1.5 text-[10px]"
+            onClick={() => setSourceFilter("mcp")}
+            title="Only conversations started by MCP agents"
+          >
+            <Bot className="h-3 w-3" />
+            Agent
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto py-1">
@@ -81,6 +120,12 @@ function ConversationSidebar() {
               >
                 <div className="flex items-start justify-between gap-1">
                   <span className="line-clamp-2 flex-1 text-xs font-medium leading-snug">
+                    {conv.source === "mcp" && (
+                      <Bot
+                        className="mr-1 inline h-3 w-3 align-text-bottom text-muted-foreground"
+                        aria-label="Agent conversation"
+                      />
+                    )}
                     {conv.title}
                   </span>
                   {hoveredId === conv.id && (
