@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"Exit=$?\")",
+      "Bash(npm.cmd test *)",
+      "Bash(npm.cmd run *)",
+      "Bash(cargo test *)"
+    ]
+  }
+}
