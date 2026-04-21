@@ -34,6 +34,7 @@ import {
   saveSearchApiConfig,
   getRecentProjects,
   saveLastProject,
+  addToRecentProjects,
   removeFromRecentProjects,
 } from "@/lib/project-store"
 import { saveReviewItems, loadReviewItems } from "@/lib/persist"
@@ -55,7 +56,7 @@ import { saveChatHistory } from "@/lib/persist"
 import { queueResearch } from "@/lib/deep-research"
 import { useResearchStore } from "@/stores/research-store"
 import { enqueueBatch, getQueue } from "@/lib/ingest-queue"
-import { normalizePath, getFileName, getFileStem, getRelativePath } from "@/lib/path-utils"
+import { normalizePath, getFileName, getFileStem, getRelativePath, resolveWithinBase } from "@/lib/path-utils"
 import type { FileNode, WikiProject } from "@/types/wiki"
 
 // ── Types shared with the Rust bridge ──────────────────────────────────────
@@ -303,6 +304,9 @@ const handlers: Record<string, RouteHandler> = {
     const body = asObject(req.body)
     const path = asString(body.path, "path")
     const project = await rustOpenProject(path)
+    // MCP tool contract says `open_project` adds the project to the recent
+    // list. Without this, a subsequent `list_projects` won't reflect it.
+    await addToRecentProjects(project)
     return { project }
   },
 
@@ -424,9 +428,12 @@ const handlers: Record<string, RouteHandler> = {
     const taskIds = await enqueueBatch(project, enqueueArgs)
 
     // Wrap the queue in a job so callers can poll/stream completion.
-    const jobId = startJob("ingest", project, async (jid) => {
+    const jobId = startJob("ingest", project, async (jid, signal) => {
       let lastDetail = ""
       while (true) {
+        if (signal.aborted) {
+          throw new Error("cancelled")
+        }
         const queue = getQueue()
         const ours = queue.filter((t) => taskIds.includes(t.id))
         const pending = ours.filter((t) => t.status === "pending" || t.status === "processing")
@@ -453,7 +460,10 @@ const handlers: Record<string, RouteHandler> = {
     const body = asObject(req.body)
     const project = requireProject(body)
     const target = asString(body.path, "path")
-    const full = target.startsWith("/") || /^[A-Za-z]:/.test(target) ? target : `${project}/${target}`
+    // Resolve strictly under the project root — absolute paths and `..`
+    // traversal are both rejected so a token-holding caller cannot delete
+    // arbitrary files outside the project.
+    const full = resolveWithinBase(project, target)
     await deleteFile(full)
     return { deleted: target }
   },
@@ -495,7 +505,9 @@ const handlers: Record<string, RouteHandler> = {
     const project = requireProject(asObject(req.body), req)
     const rel = req.query.path
     if (!rel) throw new Error("query parameter `path` is required")
-    const full = `${project}/${rel}`
+    // Reject absolute / traversal paths so a token-holding caller cannot
+    // read arbitrary files (`../../secrets.txt`) through this endpoint.
+    const full = resolveWithinBase(project, rel)
     const content = await readFile(full)
     return { path: rel, content }
   },
@@ -613,13 +625,15 @@ const handlers: Record<string, RouteHandler> = {
     // Lint page would stay on its empty "Run lint to check wiki health" state.
     useLintStore.getState().beginRun("mcp")
 
-    const jobId = startJob("lint", project, async () => {
+    const jobId = startJob("lint", project, async (_jid, signal) => {
       try {
         const structural = await runStructuralLint(project)
+        if (signal.aborted) throw new Error("cancelled")
         let semanticResults: LintResult[] = []
         if (semantic) {
           semanticResults = await runSemanticLint(project, llmConfig)
         }
+        if (signal.aborted) throw new Error("cancelled")
         const all: LintResult[] = [...structural, ...semanticResults]
         useLintStore.getState().setResults({
           results: all,
@@ -662,9 +676,12 @@ const handlers: Record<string, RouteHandler> = {
       throw new Error("search provider not configured (POST /api/config/search first)")
     }
 
-    const jobId = startJob("research", project, async (jid) => {
+    const jobId = startJob("research", project, async (jid, signal) => {
       const taskId = queueResearch(project, topic, llmConfig, searchConfig, queries)
       while (true) {
+        if (signal.aborted) {
+          throw new Error("cancelled")
+        }
         const task = useResearchStore.getState().tasks.find((t) => t.id === taskId)
         if (!task) {
           throw new Error("research task disappeared")
@@ -707,11 +724,13 @@ const handlers: Record<string, RouteHandler> = {
     if (!id) throw new Error("query parameter `id` is required")
     const job = jobs.get(id)
     if (!job) throw new Error(`unknown job: ${id}`)
+    // Only signal cancellation. Releasing the lock and deleting the record
+    // here used to let the cancelled work keep mutating the project while a
+    // second job started in parallel — a race the lock is supposed to prevent.
+    // The job's own `finally` block will release the lock and we keep the
+    // record so callers can still observe its final status.
     job.abort.abort()
-    // Release the project lock proactively; the job's own `finally` will
-    // be a no-op since the owning id no longer matches.
-    releaseProjectFromJob(job.projectPath, job.id)
-    jobs.delete(id)
+    job.detail = "cancelling"
     return { cancelled: id }
   },
 }
@@ -883,22 +902,74 @@ function mergeReviewItems(persisted: ReviewItem[], inMemory: ReviewItem[]): Revi
 }
 
 async function selectProjectInRenderer(project: WikiProject): Promise<void> {
+  // Mirror App.tsx::handleProjectOpened so the GUI doesn't keep displaying
+  // the previous project's chats, reviews, research tasks, activity feed, or
+  // lint results after an MCP/CLI-initiated switch. Without this, the GUI
+  // and the MCP bridge diverge.
+  useReviewStore.getState().clear()
+  useChatStore.getState().clear()
+  useResearchStore.getState().clear()
+  useActivityStore.getState().clear()
+  useLintStore.getState().clear()
+  const { clearGraphCache } = await import("@/lib/graph-relevance")
+  clearGraphCache()
+
   useWikiStore.getState().setProject(project)
   useWikiStore.getState().setSelectedFile(null)
   await saveLastProject(project)
+
+  // Resume any interrupted ingest tasks saved under this project.
+  try {
+    const { restoreQueue } = await import("@/lib/ingest-queue")
+    await restoreQueue(project.path)
+  } catch {
+    // non-critical
+  }
+
   try {
     const tree = await listDirectory(project.path)
     useWikiStore.getState().setFileTree(tree)
   } catch {
     // ignore
   }
-  // Mirror App.tsx: notify the clip server of the new active project so the
-  // Chrome extension keeps working.
-  fetch("http://127.0.0.1:19827/project", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: project.path }),
-  }).catch(() => {})
+
+  // Load persisted review and chat state for this project.
+  try {
+    const savedReview = await loadReviewItems(project.path)
+    useReviewStore.getState().setItems(savedReview)
+  } catch {
+    useReviewStore.getState().setItems([])
+  }
+  try {
+    const { loadChatHistory } = await import("@/lib/persist")
+    const savedChat = await loadChatHistory(project.path)
+    useChatStore.getState().setConversations(savedChat.conversations)
+    useChatStore.getState().setMessages(savedChat.messages)
+    const sorted = [...savedChat.conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+    useChatStore.getState().setActiveConversation(sorted[0]?.id ?? null)
+  } catch {
+    useChatStore.getState().setConversations([])
+    useChatStore.getState().setMessages([])
+    useChatStore.getState().setActiveConversation(null)
+  }
+
+  // Notify the clip server of the new active project and update the
+  // recent-projects list so the Chrome extension picker stays in sync.
+  try {
+    await fetch("http://127.0.0.1:19827/project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: project.path }),
+    })
+    const recents = await getRecentProjects()
+    await fetch("http://127.0.0.1:19827/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projects: recents.map((p) => ({ name: p.name, path: p.path })) }),
+    })
+  } catch {
+    // clip server not reachable — fine
+  }
 }
 
 // ── Query implementation ───────────────────────────────────────────────────

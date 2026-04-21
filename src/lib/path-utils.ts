@@ -44,3 +44,35 @@ export function getRelativePath(fullPath: string, basePath: string): string {
   }
   return normalFull
 }
+
+/**
+ * Resolve `rel` against `base` and ensure the result stays inside `base`.
+ * Collapses `.` / `..` segments and rejects absolute / drive paths so callers
+ * cannot escape the project root via `../` or `C:\...`.
+ *
+ * Throws on traversal attempts; returns the normalized absolute path otherwise.
+ */
+export function resolveWithinBase(base: string, rel: string): string {
+  const normalizedBase = normalizePath(base).replace(/\/$/, "")
+  const normalizedRel = normalizePath(rel)
+
+  if (normalizedRel.startsWith("/") || /^[A-Za-z]:\//.test(normalizedRel)) {
+    throw new Error(`path must be project-relative, not absolute: ${rel}`)
+  }
+
+  const segments = normalizedRel.split("/")
+  const resolved: string[] = []
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue
+    if (seg === "..") {
+      if (resolved.length === 0) {
+        throw new Error(`path escapes project root: ${rel}`)
+      }
+      resolved.pop()
+      continue
+    }
+    resolved.push(seg)
+  }
+
+  return `${normalizedBase}/${resolved.join("/")}`
+}

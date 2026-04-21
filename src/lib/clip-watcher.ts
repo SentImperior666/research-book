@@ -21,12 +21,17 @@ export function startClipWatcher() {
 
       const store = useWikiStore.getState()
       const project = store.project
+      const llmConfig = store.llmConfig
+      const llmReady =
+        llmConfig.apiKey ||
+        llmConfig.provider === "ollama" ||
+        llmConfig.provider === "custom"
 
       for (const clip of data.clips) {
         const clipProjectPath: string = clip.projectPath
         const clipFilePath: string = clip.filePath
 
-        // Refresh file tree if clip is for current project
+        // Refresh file tree only if clip is for current project
         if (project && clipProjectPath === project.path) {
           try {
             const tree = await listDirectory(project.path)
@@ -34,14 +39,14 @@ export function startClipWatcher() {
           } catch {
             // ignore
           }
+        }
 
-          // Auto-ingest the clipped file
-          const llmConfig = store.llmConfig
-          if (llmConfig.apiKey || llmConfig.provider === "ollama") {
-            autoIngest(clipProjectPath, clipFilePath, llmConfig).catch((err) => {
-              console.error("Failed to auto-ingest web clip:", err)
-            })
-          }
+        // Auto-ingest regardless of which project the clip was saved to, so
+        // clips saved while a different project is active still get picked up.
+        if (llmReady) {
+          autoIngest(clipProjectPath, clipFilePath, llmConfig).catch((err) => {
+            console.error("Failed to auto-ingest web clip:", err)
+          })
         }
       }
     } catch {

@@ -31,7 +31,15 @@ interface ReviewState {
   clear: () => void
 }
 
-let counter = 0
+function newReviewId(): string {
+  // UUIDs avoid colliding with persisted review items after restart — a
+  // session-local counter would start at 0 again and reuse ids that are
+  // already on disk, making `resolve_review_item` ambiguous.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `review-${crypto.randomUUID()}`
+  }
+  return `review-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
 
 export const useReviewStore = create<ReviewState>((set) => ({
   items: [],
@@ -42,7 +50,7 @@ export const useReviewStore = create<ReviewState>((set) => ({
         ...state.items,
         {
           ...item,
-          id: `review-${++counter}`,
+          id: newReviewId(),
           resolved: false,
           createdAt: Date.now(),
         },
@@ -55,7 +63,7 @@ export const useReviewStore = create<ReviewState>((set) => ({
         ...state.items,
         ...items.map((item) => ({
           ...item,
-          id: `review-${++counter}`,
+          id: newReviewId(),
           resolved: false,
           createdAt: Date.now(),
         })),

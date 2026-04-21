@@ -174,7 +174,7 @@ export async function searchWiki(
           boosted++
         } else {
           // Try to find the file and add it
-          const dirs = ["entities", "concepts", "sources", "synthesis", "comparison", "queries"]
+          const dirs = ["entities", "concepts", "sources", "synthesis", "comparisons", "queries"]
           for (const dir of dirs) {
             const tryPath = `${pp}/wiki/${dir}/${vr.id}.md`
             if (existingPaths.has(tryPath)) break

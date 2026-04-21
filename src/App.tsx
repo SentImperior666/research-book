@@ -10,6 +10,7 @@ import { useLintStore } from "@/stores/lint-store"
 import { listDirectory, openProject } from "@/commands/fs"
 import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig } from "@/lib/project-store"
 import { loadReviewItems, loadChatHistory } from "@/lib/persist"
+import { clearGraphCache } from "@/lib/graph-relevance"
 import { setupAutoSave } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
 import { startApiServer } from "@/lib/api-server"
@@ -85,6 +86,7 @@ function App() {
     useResearchStore.getState().clear()
     useActivityStore.getState().clear()
     useLintStore.getState().clear()
+    clearGraphCache()
 
     setProject(proj)
     setSelectedFile(null)

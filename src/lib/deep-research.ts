@@ -18,8 +18,9 @@ export function queueResearch(
   searchConfig: SearchApiConfig,
   searchQueries?: string[],
 ): string {
+  const pp = normalizePath(projectPath)
   const store = useResearchStore.getState()
-  const taskId = store.addTask(topic)
+  const taskId = store.addTask(topic, pp)
   // Store search queries on the task
   if (searchQueries && searchQueries.length > 0) {
     store.updateTask(taskId, { searchQueries })
@@ -28,7 +29,7 @@ export function queueResearch(
   store.setPanelOpen(true)
   // Start processing on next tick to ensure React has rendered the panel
   setTimeout(() => {
-    processQueue(projectPath, llmConfig, searchConfig)
+    processQueue(pp, llmConfig, searchConfig)
   }, 50)
   return taskId
 }
@@ -41,14 +42,18 @@ function processQueue(
   llmConfig: LlmConfig,
   searchConfig: SearchApiConfig,
 ) {
+  const pp = normalizePath(projectPath)
   const store = useResearchStore.getState()
   const running = store.getRunningCount()
   const available = store.maxConcurrent - running
 
   for (let i = 0; i < available; i++) {
-    const next = useResearchStore.getState().getNextQueued()
+    // Pull only tasks that belong to THIS project. Previously, a task queued
+    // against project A could be picked up by a `processQueue(B, …)` tick and
+    // executed against B's wiki.
+    const next = useResearchStore.getState().getNextQueued(pp)
     if (!next) break
-    executeResearch(projectPath, next.id, next.topic, llmConfig, searchConfig)
+    executeResearch(next.projectPath, next.id, next.topic, llmConfig, searchConfig)
   }
 }
 

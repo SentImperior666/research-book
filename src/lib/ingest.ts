@@ -8,7 +8,7 @@ import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 
-const FILE_BLOCK_REGEX = /---FILE:\s*([^\n-]+?)\s*---\n([\s\S]*?)---END FILE---/g
+const FILE_BLOCK_REGEX = /---FILE:\s*([^\n]+?)\s*---\n([\s\S]*?)---END FILE---/g
 
 export const LANGUAGE_RULE = "## Language Rule\n- ALWAYS match the language of the source document. If the source is in Chinese, write in Chinese. If in English, write in English. Wiki page titles, content, and descriptions should all be in the same language as the source material."
 
@@ -64,6 +64,7 @@ export async function autoIngest(
   activity.updateItem(activityId, { detail: "Step 1/2: Analyzing source..." })
 
   let analysis = ""
+  let analysisError: Error | null = null
 
   await streamChat(
     llmConfig,
@@ -75,14 +76,18 @@ export async function autoIngest(
       onToken: (token) => { analysis += token },
       onDone: () => {},
       onError: (err) => {
+        analysisError = err
         activity.updateItem(activityId, { status: "error", detail: `Analysis failed: ${err.message}` })
       },
     },
     signal,
   )
 
+  if (analysisError) {
+    throw analysisError
+  }
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {
-    return []
+    throw new Error("Analysis failed")
   }
 
   // ── Step 2: Generation ────────────────────────────────────────
@@ -90,6 +95,7 @@ export async function autoIngest(
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
   let generation = ""
+  let generationError: Error | null = null
 
   await streamChat(
     llmConfig,
@@ -114,14 +120,18 @@ export async function autoIngest(
       onToken: (token) => { generation += token },
       onDone: () => {},
       onError: (err) => {
+        generationError = err
         activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
       },
     },
     signal,
   )
 
+  if (generationError) {
+    throw generationError
+  }
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {
-    return []
+    throw new Error("Generation failed")
   }
 
   // ── Step 3: Write files ───────────────────────────────────────
@@ -212,6 +222,10 @@ export async function autoIngest(
     detail,
     filesWritten: writtenPaths,
   })
+
+  if (writtenPaths.length === 0) {
+    throw new Error("ingest produced no files (parse failure or empty generation)")
+  }
 
   return writtenPaths
 }
@@ -486,8 +500,8 @@ export async function startIngest(
 
   const [sourceContent, schema, purpose, index] = await Promise.all([
     tryReadFile(sp),
-    tryReadFile(`${pp}/wiki/schema.md`),
-    tryReadFile(`${pp}/wiki/purpose.md`),
+    tryReadFile(`${pp}/schema.md`),
+    tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 

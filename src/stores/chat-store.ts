@@ -68,11 +68,14 @@ interface ChatState {
   getActiveMessages: () => DisplayMessage[]
 }
 
-let messageCounter = 0
-
 function nextId(): string {
-  messageCounter += 1
-  return String(messageCounter)
+  // UUIDs avoid collisions with persisted messages after restart — a
+  // session-local counter would reset to 0 and reuse ids "1", "2", …
+  // that already existed on disk.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
 }
 
 function generateConversationId(): string {

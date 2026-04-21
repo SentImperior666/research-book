@@ -257,6 +257,19 @@ export function SourcesView() {
         return name
       }).filter(Boolean)
 
+      // Drop stale vector embeddings for deleted pages so semantic search
+      // doesn't keep returning them until a full reindex.
+      if (deletedPageSlugs.length > 0) {
+        try {
+          const { removePageEmbedding } = await import("@/lib/embedding")
+          for (const slug of deletedPageSlugs) {
+            await removePageEmbedding(pp, slug).catch(() => {})
+          }
+        } catch {
+          // embedding module unavailable — fine
+        }
+      }
+
       if (deletedPageSlugs.length > 0) {
         try {
           const indexPath = `${pp}/wiki/index.md`

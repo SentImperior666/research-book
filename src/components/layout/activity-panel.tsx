@@ -7,7 +7,7 @@ import {
 import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { normalizePath, getFileName } from "@/lib/path-utils"
-import { getQueue, getQueueSummary, retryTask, cancelTask, type IngestTask } from "@/lib/ingest-queue"
+import { getQueue, retryTask, cancelTask, type IngestTask } from "@/lib/ingest-queue"
 
 const FILE_TYPE_ICONS: Record<string, typeof FileText> = {
   sources: BookOpen,
@@ -40,16 +40,24 @@ export function ActivityPanel() {
   const runningCount = items.filter((i) => i.status === "running").length
   const hasItems = items.length > 0
 
-  // Poll queue state
+  // Poll queue state — filter to only tasks for the active project so other
+  // projects' pending work doesn't show up in this panel.
   useEffect(() => {
     const interval = setInterval(() => {
-      setQueueTasks([...getQueue()])
+      const pp = project ? normalizePath(project.path) : null
+      const all = [...getQueue()]
+      setQueueTasks(pp ? all.filter((t) => t.projectPath === pp) : [])
     }, 1000)
     return () => clearInterval(interval)
-  }, [])
+  }, [project])
 
-  const queueSummary = getQueueSummary()
-  const hasQueue = queueSummary.total > 0
+  const queueSummary = {
+    pending: queueTasks.filter((t) => t.status === "pending").length,
+    processing: queueTasks.filter((t) => t.status === "processing").length,
+    failed: queueTasks.filter((t) => t.status === "failed").length,
+    total: queueTasks.length,
+  }
+  const hasQueue = queueTasks.length > 0
 
   // All hooks must be before any conditional return
   const handleRetry = useCallback((taskId: string) => {

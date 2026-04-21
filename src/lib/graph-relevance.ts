@@ -19,6 +19,7 @@ export interface RetrievalNode {
 export interface RetrievalGraph {
   readonly nodes: ReadonlyMap<string, RetrievalNode>
   readonly dataVersion: number
+  readonly projectPath: string
 }
 
 // ---------------------------------------------------------------------------
@@ -156,17 +157,24 @@ export async function buildRetrievalGraph(
   projectPath: string,
   dataVersion: number = 0,
 ): Promise<RetrievalGraph> {
-  // Return cached if version matches
-  if (cachedGraph !== null && cachedGraph.dataVersion === dataVersion) {
+  const normalizedProject = normalizePath(projectPath)
+  // Return cached if project AND version match — caching by dataVersion alone
+  // leaked graphs across project switches when both projects happened to share
+  // a version number (e.g. freshly opened).
+  if (
+    cachedGraph !== null &&
+    cachedGraph.dataVersion === dataVersion &&
+    cachedGraph.projectPath === normalizedProject
+  ) {
     return cachedGraph
   }
 
-  const wikiRoot = `${normalizePath(projectPath)}/wiki`
+  const wikiRoot = `${normalizedProject}/wiki`
   let tree: FileNode[]
   try {
     tree = await listDirectory(wikiRoot)
   } catch {
-    const emptyGraph: RetrievalGraph = { nodes: new Map(), dataVersion }
+    const emptyGraph: RetrievalGraph = { nodes: new Map(), dataVersion, projectPath: normalizedProject }
     cachedGraph = emptyGraph
     return emptyGraph
   }
@@ -239,7 +247,7 @@ export async function buildRetrievalGraph(
     })
   }
 
-  const graph: RetrievalGraph = { nodes, dataVersion }
+  const graph: RetrievalGraph = { nodes, dataVersion, projectPath: normalizedProject }
   cachedGraph = graph
   return graph
 }

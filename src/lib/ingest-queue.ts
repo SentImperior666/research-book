@@ -7,6 +7,7 @@ import { normalizePath } from "@/lib/path-utils"
 
 export interface IngestTask {
   id: string
+  projectPath: string  // normalized absolute project path this task belongs to
   sourcePath: string  // relative to project: "raw/sources/folder/file.pdf"
   folderContext: string  // e.g. "AI-Research > papers" or ""
   status: "pending" | "processing" | "done" | "failed"
@@ -16,10 +17,17 @@ export interface IngestTask {
 }
 
 // ── State ─────────────────────────────────────────────────────────────────
+//
+// Tasks for every known project live in one shared queue and each task carries
+// its own `projectPath`. The queue file on disk is still per-project — we only
+// serialize the tasks that belong to each project. Previously the in-memory
+// queue was a single array replaced whenever a project was opened, so opening
+// project B would wipe project A's pending work from memory (and
+// `processNext` would run the next task against whatever path was passed
+// last, even if the task itself came from a different project).
 
 let queue: IngestTask[] = []
 let processing = false
-let currentProjectPath = ""
 let currentAbortController: AbortController | null = null
 let lastWrittenFiles: string[] = []  // track files written by current ingest for cleanup
 
@@ -31,9 +39,12 @@ function queueFilePath(projectPath: string): string {
 
 async function saveQueue(projectPath: string): Promise<void> {
   try {
-    // Only save pending and failed tasks (done tasks are removed)
-    const toSave = queue.filter((t) => t.status !== "done")
-    await writeFile(queueFilePath(projectPath), JSON.stringify(toSave, null, 2))
+    const pp = normalizePath(projectPath)
+    // Only save pending/failed tasks for THIS project. The in-memory queue
+    // can hold tasks for other projects simultaneously; we mustn't write
+    // them into this project's queue file.
+    const toSave = queue.filter((t) => t.projectPath === pp && t.status !== "done")
+    await writeFile(queueFilePath(pp), JSON.stringify(toSave, null, 2))
   } catch {
     // non-critical
   }
@@ -42,7 +53,13 @@ async function saveQueue(projectPath: string): Promise<void> {
 async function loadQueue(projectPath: string): Promise<IngestTask[]> {
   try {
     const raw = await readFile(queueFilePath(projectPath))
-    return JSON.parse(raw) as IngestTask[]
+    const pp = normalizePath(projectPath)
+    const parsed = JSON.parse(raw) as Array<Partial<IngestTask>>
+    // Backfill `projectPath` on legacy queue files that didn't record it, so
+    // we never dispatch a task against the wrong project.
+    return parsed
+      .filter((t): t is IngestTask => typeof t?.id === "string" && typeof t?.sourcePath === "string")
+      .map((t) => ({ ...(t as IngestTask), projectPath: t.projectPath ?? pp }))
   } catch {
     return []
   }
@@ -63,10 +80,10 @@ export async function enqueueIngest(
   folderContext: string = "",
 ): Promise<string> {
   const pp = normalizePath(projectPath)
-  currentProjectPath = pp
 
   const task: IngestTask = {
     id: generateId(),
+    projectPath: pp,
     sourcePath,
     folderContext,
     status: "pending",
@@ -79,7 +96,7 @@ export async function enqueueIngest(
   await saveQueue(pp)
 
   // Start processing if not already running
-  processNext(pp)
+  processNext()
 
   return task.id
 }
@@ -92,12 +109,12 @@ export async function enqueueBatch(
   files: Array<{ sourcePath: string; folderContext: string }>,
 ): Promise<string[]> {
   const pp = normalizePath(projectPath)
-  currentProjectPath = pp
   const ids: string[] = []
 
   for (const file of files) {
     const task: IngestTask = {
       id: generateId(),
+      projectPath: pp,
       sourcePath: file.sourcePath,
       folderContext: file.folderContext,
       status: "pending",
@@ -111,7 +128,7 @@ export async function enqueueBatch(
 
   await saveQueue(pp)
   console.log(`[Ingest Queue] Enqueued ${files.length} files`)
-  processNext(pp)
+  processNext()
 
   return ids
 }
@@ -126,7 +143,7 @@ export async function retryTask(projectPath: string, taskId: string): Promise<vo
   task.status = "pending"
   task.error = null
   await saveQueue(projectPath)
-  processNext(normalizePath(projectPath))
+  processNext()
 }
 
 /**
@@ -167,15 +184,20 @@ export async function cancelTask(projectPath: string, taskId: string): Promise<v
   console.log(`[Ingest Queue] Cancelled: ${task.sourcePath}`)
 
   // Continue with next task
-  processNext(normalizePath(projectPath))
+  processNext()
 }
 
 /**
  * Clear all done/failed tasks from the queue.
  */
 export async function clearCompletedTasks(projectPath: string): Promise<void> {
-  queue = queue.filter((t) => t.status === "pending" || t.status === "processing")
-  await saveQueue(projectPath)
+  const pp = normalizePath(projectPath)
+  // Only prune completed tasks for THIS project; another project's history
+  // is not the current caller's concern.
+  queue = queue.filter(
+    (t) => t.projectPath !== pp || t.status === "pending" || t.status === "processing",
+  )
+  await saveQueue(pp)
 }
 
 /**
@@ -205,8 +227,12 @@ export function getQueueSummary(): { pending: number; processing: number; failed
  */
 export async function restoreQueue(projectPath: string): Promise<void> {
   const pp = normalizePath(projectPath)
-  currentProjectPath = pp
   const saved = await loadQueue(pp)
+
+  // Drop anything we previously held for this project and merge in what was
+  // on disk. Other projects' tasks in memory are untouched, so switching
+  // projects no longer wipes pending work.
+  queue = queue.filter((t) => t.projectPath !== pp)
 
   if (saved.length === 0) return
 
@@ -219,15 +245,15 @@ export async function restoreQueue(projectPath: string): Promise<void> {
     }
   }
 
-  queue = saved
+  queue.push(...saved)
   await saveQueue(pp)
 
-  const pending = queue.filter((t) => t.status === "pending").length
-  const failed = queue.filter((t) => t.status === "failed").length
+  const pending = saved.filter((t) => t.status === "pending").length
+  const failed = saved.filter((t) => t.status === "failed").length
 
   if (pending > 0 || restored > 0) {
     console.log(`[Ingest Queue] Restored: ${pending} pending, ${failed} failed, ${restored} resumed from interrupted`)
-    processNext(pp)
+    processNext()
   }
 }
 
@@ -235,7 +261,7 @@ export async function restoreQueue(projectPath: string): Promise<void> {
 
 const MAX_RETRIES = 3
 
-async function processNext(projectPath: string): Promise<void> {
+async function processNext(): Promise<void> {
   if (processing) return
 
   const next = queue.find((t) => t.status === "pending")
@@ -243,9 +269,9 @@ async function processNext(projectPath: string): Promise<void> {
 
   processing = true
   next.status = "processing"
-  await saveQueue(projectPath)
+  const pp = normalizePath(next.projectPath)
+  await saveQueue(pp)
 
-  const pp = normalizePath(projectPath)
   const llmConfig = useWikiStore.getState().llmConfig
 
   // Check if LLM is configured
@@ -254,7 +280,7 @@ async function processNext(projectPath: string): Promise<void> {
     next.error = "LLM not configured — set API key in Settings"
     processing = false
     await saveQueue(pp)
-    processNext(pp)
+    processNext()
     return
   }
 
@@ -297,5 +323,5 @@ async function processNext(projectPath: string): Promise<void> {
   }
 
   processing = false
-  processNext(pp)
+  processNext()
 }

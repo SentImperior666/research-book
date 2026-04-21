@@ -170,7 +170,9 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
         }
         (&Method::Get, "/project") => {
             let path = CURRENT_PROJECT.lock().unwrap().clone();
-            let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
+            // Serialize via serde_json so Windows paths with backslashes are
+            // escaped correctly (hand-built JSON produced invalid responses).
+            let body = serde_json::json!({"ok": true, "path": path}).to_string();
             let mut response = Response::from_string(body);
             for h in &cors_headers {
                 response.add_header(h.clone());
@@ -180,7 +182,10 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
         (&Method::Post, "/project") => {
             let mut body = String::new();
             if let Err(e) = request.as_reader().read_to_string(&mut body) {
-                let err = format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                let err = serde_json::json!({
+                    "ok": false,
+                    "error": format!("Failed to read body: {}", e),
+                }).to_string();
                 let mut response = Response::from_string(err).with_status_code(400);
                 for h in &cors_headers {
                     response.add_header(h.clone());
@@ -200,18 +205,17 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
         (&Method::Get, "/projects") => {
             let projects = ALL_PROJECTS.lock().unwrap().clone();
             let current = CURRENT_PROJECT.lock().unwrap().clone();
-            let items: Vec<String> = projects
+            let items: Vec<serde_json::Value> = projects
                 .iter()
                 .map(|(name, path)| {
-                    format!(
-                        r#"{{"name":"{}","path":"{}","current":{}}}"#,
-                        name.replace('"', r#"\""#),
-                        path.replace('"', r#"\""#),
-                        path == &current
-                    )
+                    serde_json::json!({
+                        "name": name,
+                        "path": path,
+                        "current": path == &current,
+                    })
                 })
                 .collect();
-            let body = format!(r#"{{"ok":true,"projects":[{}]}}"#, items.join(","));
+            let body = serde_json::json!({"ok": true, "projects": items}).to_string();
             let mut response = Response::from_string(body);
             for h in &cors_headers {
                 response.add_header(h.clone());
@@ -243,17 +247,16 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
         }
         (&Method::Get, "/clips/pending") => {
             let mut pending = PENDING_CLIPS.lock().unwrap();
-            let items: Vec<String> = pending
+            let items: Vec<serde_json::Value> = pending
                 .iter()
                 .map(|(proj, file)| {
-                    format!(
-                        r#"{{"projectPath":"{}","filePath":"{}"}}"#,
-                        proj.replace('"', r#"\""#),
-                        file.replace('"', r#"\""#)
-                    )
+                    serde_json::json!({
+                        "projectPath": proj,
+                        "filePath": file,
+                    })
                 })
                 .collect();
-            let body = format!(r#"{{"ok":true,"clips":[{}]}}"#, items.join(","));
+            let body = serde_json::json!({"ok": true, "clips": items}).to_string();
             pending.clear();
             let mut response = Response::from_string(body);
             for h in &cors_headers {
@@ -264,7 +267,10 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
         (&Method::Post, "/clip") => {
             let mut body = String::new();
             if let Err(e) = request.as_reader().read_to_string(&mut body) {
-                let err = format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                let err = serde_json::json!({
+                    "ok": false,
+                    "error": format!("Failed to read body: {}", e),
+                }).to_string();
                 let mut response = Response::from_string(err).with_status_code(400);
                 for h in &cors_headers {
                     response.add_header(h.clone());
@@ -295,27 +301,27 @@ fn handle_request(app: &AppHandle, mut request: tiny_http::Request) {
 fn handle_set_project(body: &str) -> String {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+        Err(e) => return serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string(),
     };
 
     let path = match parsed["path"].as_str() {
         Some(p) => p.to_string(),
-        None => return r#"{"ok":false,"error":"path field is required"}"#.to_string(),
+        None => return serde_json::json!({"ok": false, "error": "path field is required"}).to_string(),
     };
 
     match CURRENT_PROJECT.lock() {
         Ok(mut guard) => {
             *guard = path;
-            r#"{"ok":true}"#.to_string()
+            serde_json::json!({"ok": true}).to_string()
         }
-        Err(e) => format!(r#"{{"ok":false,"error":"Lock error: {}"}}"#, e),
+        Err(e) => serde_json::json!({"ok": false, "error": format!("Lock error: {}", e)}).to_string(),
     }
 }
 
 fn handle_clip(body: &str) -> String {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+        Err(e) => return serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string(),
     };
 
     let title = parsed["title"].as_str().unwrap_or("Untitled");
@@ -327,19 +333,45 @@ fn handle_clip(body: &str) -> String {
     let project_path = if project_path_from_body.is_empty() {
         match CURRENT_PROJECT.lock() {
             Ok(guard) => guard.clone(),
-            Err(e) => return format!(r#"{{"ok":false,"error":"Lock error: {}"}}"#, e),
+            Err(e) => return serde_json::json!({"ok": false, "error": format!("Lock error: {}", e)}).to_string(),
         }
     } else {
         project_path_from_body
     };
 
     if project_path.is_empty() {
-        return r#"{"ok":false,"error":"projectPath is required (set via POST /project or include in request body)"}"#
-            .to_string();
+        return serde_json::json!({
+            "ok": false,
+            "error": "projectPath is required (set via POST /project or include in request body)",
+        }).to_string();
+    }
+
+    // Only allow writes into projects the desktop app has registered as "known"
+    // (POST /projects from the renderer), plus the current active project. This
+    // stops any local process or browser extension from discovering a project
+    // path and writing arbitrary markdown into foreign directories via /clip.
+    let is_known_project = {
+        let projects = ALL_PROJECTS.lock().ok();
+        let current = CURRENT_PROJECT.lock().ok();
+        let current_match = current
+            .as_ref()
+            .map(|g| !g.is_empty() && g.as_str() == project_path)
+            .unwrap_or(false);
+        let listed_match = projects
+            .as_ref()
+            .map(|list| list.iter().any(|(_, p)| p == &project_path))
+            .unwrap_or(false);
+        current_match || listed_match
+    };
+    if !is_known_project {
+        return serde_json::json!({
+            "ok": false,
+            "error": "projectPath is not a known project",
+        }).to_string();
     }
 
     if content.is_empty() {
-        return r#"{"ok":false,"error":"content is required"}"#.to_string();
+        return serde_json::json!({"ok": false, "error": "content is required"}).to_string();
     }
 
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -368,10 +400,10 @@ fn handle_clip(body: &str) -> String {
 
     // Ensure directory exists
     if let Err(e) = std::fs::create_dir_all(&dir_path) {
-        return format!(
-            r#"{{"ok":false,"error":"Failed to create directory: {}"}}"#,
-            e
-        );
+        return serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to create directory: {}", e),
+        }).to_string();
     }
 
     // Find unique filename
@@ -395,10 +427,10 @@ fn handle_clip(body: &str) -> String {
     );
 
     if let Err(e) = std::fs::write(&file_path, &markdown) {
-        return format!(
-            r#"{{"ok":false,"error":"Failed to write file: {}"}}"#,
-            e
-        );
+        return serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to write file: {}", e),
+        }).to_string();
     }
 
     // Compute relative path using Path for cross-platform separator handling
@@ -415,5 +447,5 @@ fn handle_clip(body: &str) -> String {
         pending.push((project_path, file_path.clone()));
     }
 
-    format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
+    serde_json::json!({"ok": true, "path": relative_path}).to_string()
 }

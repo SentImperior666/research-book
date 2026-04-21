@@ -82,6 +82,7 @@ export function SettingsView() {
     const newConfig = { provider, apiKey, model, ollamaUrl, customEndpoint, maxContextSize }
     const newSearchConfig = { provider: searchProvider, apiKey: searchApiKey }
     const newEmbeddingConfig = { enabled: embeddingEnabled, endpoint: embeddingEndpoint, apiKey: embeddingApiKey, model: embeddingModel }
+    const prevEmbeddingConfig = embeddingConfig
     setSearchApiConfig(newSearchConfig)
     await saveSearchApiConfig(newSearchConfig)
     setEmbeddingConfig(newEmbeddingConfig)
@@ -90,6 +91,26 @@ export function SettingsView() {
     await saveLlmConfig(newConfig)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
+
+    // Kick off a background backfill whenever embeddings have just been
+    // turned on, or the model has changed while enabled. Without this the
+    // vector index stays empty / stale until each page is ingested again.
+    const justEnabled = newEmbeddingConfig.enabled && !prevEmbeddingConfig.enabled
+    const modelChanged =
+      newEmbeddingConfig.enabled &&
+      newEmbeddingConfig.model &&
+      newEmbeddingConfig.model !== prevEmbeddingConfig.model
+    const project = useWikiStore.getState().project
+    if (project && (justEnabled || modelChanged)) {
+      void (async () => {
+        try {
+          const { embedAllPages } = await import("@/lib/embedding")
+          await embedAllPages(project.path, newEmbeddingConfig)
+        } catch (err) {
+          console.error("Embedding backfill failed:", err)
+        }
+      })()
+    }
   }
 
   async function handleLanguageChange(lang: string) {

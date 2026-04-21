@@ -2,6 +2,7 @@ use lancedb::connect;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use arrow_array::{Float32Array, RecordBatch, StringArray, FixedSizeListArray, ArrayRef};
 use arrow_schema::{DataType, Field, Schema};
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -59,6 +60,19 @@ fn make_batch(schema: Arc<Schema>, page_id: &str, embedding: Vec<f32>, dim: i32)
         .map_err(|e| format!("Batch error: {e}"))
 }
 
+/// Read the `vector` column's fixed-size-list dimension off the open table.
+/// Returns `None` if the table exists but the schema doesn't match the
+/// expected shape (defensive — treat as incompatible).
+async fn table_vector_dim(table: &lancedb::Table) -> Option<i32> {
+    let schema_ref = table.schema().await.ok()?;
+    let field = schema_ref.field_with_name("vector").ok()?;
+    if let DataType::FixedSizeList(_, dim) = field.data_type() {
+        Some(*dim)
+    } else {
+        None
+    }
+}
+
 /// Upsert a page embedding into LanceDB
 #[tauri::command]
 pub async fn vector_upsert(
@@ -88,6 +102,26 @@ pub async fn vector_upsert(
             .execute()
             .await
             .map_err(|e| format!("Open table error: {e}"))?;
+
+        // Detect dimension mismatch: switching embedding models would otherwise
+        // keep writing against the original schema and every add would fail.
+        // Drop and recreate the table when the dimension changes.
+        let existing_dim = table_vector_dim(&table).await;
+        if existing_dim.is_some() && existing_dim != Some(dim) {
+            eprintln!(
+                "[vectorstore] Embedding dimension changed ({:?} -> {}); recreating table.",
+                existing_dim, dim
+            );
+            drop(table);
+            db.drop_table(TABLE_NAME, &[])
+                .await
+                .map_err(|e| format!("Drop table error: {e}"))?;
+            db.create_table(TABLE_NAME, data)
+                .execute()
+                .await
+                .map_err(|e| format!("Create table error: {e}"))?;
+            return Ok(());
+        }
 
         // Delete existing entry then add new one
         if let Err(e) = table.delete(&format!("page_id = '{}'", page_id)).await {
@@ -144,7 +178,6 @@ pub async fn vector_search(
 
     let mut search_results = Vec::new();
 
-    use futures::TryStreamExt;
     let batches: Vec<RecordBatch> = results_stream
         .try_collect()
         .await
