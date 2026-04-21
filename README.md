@@ -1,438 +1,505 @@
-# LLM Wiki
+# research-book
 
 <p align="center">
-  <img src="logo.jpg" width="128" height="128" style="border-radius: 22%;" alt="LLM Wiki Logo">
+  <img src="logo.jpg" width="128" height="128" style="border-radius: 22%;" alt="research-book logo">
 </p>
 
 <p align="center">
-  <strong>A personal knowledge base that builds itself.</strong><br>
-  LLM reads your documents, builds a structured wiki, and keeps it current.
+  <strong>An MCP-driven research wiki for LLM agents.</strong><br>
+  A stable, programmable knowledge base that coding agents (Cursor, Claude Code, …) can ingest into, query, audit, and extend — without ever touching the GUI.
 </p>
 
 <p align="center">
-  <a href="#what-is-this">What is this?</a> •
-  <a href="#what-we-changed--added">Features</a> •
-  <a href="#tech-stack">Tech Stack</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#credits">Credits</a> •
-  <a href="#license">License</a>
-</p>
-
-<p align="center">
-  English | <a href="README_CN.md">中文</a>
+  <a href="#what-this-fork-is-for">Why this fork</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#mcp-tools">Tools</a> •
+  <a href="#mcp-resources">Resources</a> •
+  <a href="#mcp-prompts">Prompts</a> •
+  <a href="#wire-it-into-an-mcp-client">Integrations</a> •
+  <a href="#concurrency-model">Concurrency</a> •
+  <a href="#build-from-source">Build</a>
 </p>
 
 ---
 
-<p align="center">
-  <img src="assets/overview.jpg" width="100%" alt="Overview">
-</p>
+## This is a fork
 
-## Features
+**Upstream:** [`nashsu/llm_wiki`](https://github.com/nashsu/llm_wiki) — a
+cross-platform Tauri desktop app that implements
+[Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+Credit for the original architecture, two-step ingest pipeline, knowledge
+graph, review system, and Chrome web clipper belongs entirely to the upstream
+project.
 
-- **Two-Step Chain-of-Thought Ingest** — LLM analyzes first, then generates wiki pages with source traceability and incremental cache
-- **4-Signal Knowledge Graph** — relevance model with direct links, source overlap, Adamic-Adar, and type affinity
-- **Louvain Community Detection** — automatic knowledge cluster discovery with cohesion scoring
-- **Graph Insights** — surprising connections and knowledge gaps with one-click Deep Research
-- **Vector Semantic Search** — optional embedding-based retrieval via LanceDB, supports any OpenAI-compatible endpoint
-- **Persistent Ingest Queue** — serial processing with crash recovery, cancel, retry, and progress visualization
-- **Folder Import** — recursive folder import preserving directory structure, folder context as LLM classification hint
-- **Deep Research** — LLM-optimized search topics, multi-query web search, auto-ingest results into wiki
-- **Async Review System** — LLM flags items for human judgment, predefined actions, pre-generated search queries
-- **Chrome Web Clipper** — one-click web page capture with auto-ingest into knowledge base
+**This fork** (`SentImperior666/research-book`) keeps the GUI and the pipeline
+semantically identical to upstream and **adds a programmable automation layer
+on top** so LLM agents can drive the same wiki end-to-end.
 
-## What is this?
+## What this fork is for
 
-LLM Wiki is a cross-platform desktop application that turns your documents into an organized, interlinked knowledge base — automatically. Instead of traditional RAG (retrieve-and-answer from scratch every time), the LLM **incrementally builds and maintains a persistent wiki** from your sources. Knowledge is compiled once and kept current, not re-derived on every query.
+Upstream LLM Wiki is a beautiful human-first knowledge tool: you curate, the
+LLM maintains. That's a great loop, but it stops at the edge of the GUI window
+— if you want a team of coding agents to do literature reviews, triage a
+research corpus overnight, or keep a shared wiki consistent across multiple
+projects, you need the same pipeline exposed as a real API.
 
-This project is based on [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — a methodology for building personal knowledge bases using LLMs. We implemented the core ideas as a full desktop application with significant enhancements.
+This fork's goal is exactly that: **a stable research wiki that supports
+automated research with LLM agents**. Concretely, the fork adds:
 
-<p align="center">
-  <img src="assets/llm_wiki_arch.jpg" width="100%" alt="LLM Wiki Architecture">
-</p>
+| Addition | Where it lives | What it gives you |
+| --- | --- | --- |
+| Local HTTP API (`/api/*`) | `src-tauri/src/api/` | Token-authed REST + SSE surface over the live renderer logic. 23 endpoints cover every Quick Start step. |
+| Per-project write lock | `src-tauri/src/api/locks.rs` | Mutating calls on the same project are serialized, so two agents can't corrupt the wiki. |
+| MCP server | `mcp-server/` | Typed stdio MCP adapter over the HTTP API. 23 tools, 6 resources, 3 prompts. |
+| CLI | `mcp-server/src/cli.ts` → `research-book` binary | Humans / scripts can talk to the same daemon. |
+| Claude Code skill | `.claude/skills/research-book/SKILL.md` | Teaches agents *how* to use the tools — decision rules, concurrency gotchas, anti-patterns. |
+| Per-install bearer token | OS config dir (see [Authentication](#authentication)) | Agents can't hit the daemon from random processes. |
+| Agent/human coexistence in the GUI | `src/stores/chat-store.ts` + chat sidebar filter | Conversations started by the MCP server are tagged `source: "mcp"` and can be audited with a dedicated filter toggle. |
+| Per-project store hygiene | `src/App.tsx` + `src/stores/*` | Fixed a class of bugs where review items and chat history from the previous project could leak into the next one (and then get silently written back to disk). |
+
+The GUI itself is unchanged in behavior — human curation is still the
+intended primary loop. The MCP server is an **additive second face on the
+same daemon**, using the exact code path the GUI uses.
+
+For everything about the GUI (three-column layout, ingest pipeline internals,
+knowledge graph, Obsidian compatibility, Chrome web clipper, …) see
+**[`docs/how-to-use-llm-wiki.md`](docs/how-to-use-llm-wiki.md)**.
+
+## Architecture
+
+```
+┌──────────────────┐   stdio    ┌───────────────────┐   HTTP+SSE   ┌────────────────────┐
+│   MCP client     │ ─────────► │  research-book    │ ───────────► │  desktop daemon    │
+│  (Cursor /       │            │    MCP server     │              │  (tiny_http, Rust) │
+│  Claude Code /   │ ◄───────── │ (mcp-server/*.ts) │ ◄─────────── │  src-tauri/src/api │
+│  Claude Desktop) │            └───────────────────┘              └─────────┬──────────┘
+└──────────────────┘                                                         │ Tauri events
+                                                                             ▼
+                                                                   ┌────────────────────┐
+                                                                   │     renderer       │
+                                                                   │  (src/lib/* logic) │
+                                                                   │   — same code as   │
+                                                                   │     the GUI uses   │
+                                                                   └────────────────────┘
+```
+
+Key property: **the MCP server contains no business logic.** Every tool is a
+thin wrapper over an `/api/*` endpoint that delegates to the renderer. The
+renderer runs the same `src/lib/*` code that powers the GUI. An agent's
+`query` tool call is therefore **identical** to a human clicking the chat
+button — same retrieval pipeline, same LLM call, same persistence. Anything
+the agent does, a human can see, and vice versa.
+
+### Why this shape
+
+- **Stability.** The ingest pipeline, graph, and LLM-client code are already
+  battle-tested by the upstream GUI. Building agents on top means not
+  re-implementing any of it.
+- **Auditability.** Every agent query appears in the GUI's chat sidebar with
+  an `Agent` badge. Humans can read exactly what the agent saw, asked, and
+  saved.
+- **Safety.** The daemon owns the project file lock. Concurrent mutations on
+  the same project get `409 Conflict` instead of racing.
+- **Observability.** Long jobs (ingest, query, lint, deep research) emit SSE
+  progress events that the MCP server forwards as MCP progress notifications,
+  so Claude Code can show a live progress bar.
+
+## Requirements
+
+- The **desktop app must be running** — the MCP server is a stdio adapter
+  over a local daemon at `http://127.0.0.1:19827`. If the app isn't open,
+  every tool call returns `daemon unreachable`.
+- An MCP-aware client (Cursor, Claude Code, Claude Desktop, any MCP host).
+- Node 20+ (the MCP server is a Node package).
+
+## MCP tools
+
+All 23 tools the agent can call. Mutating tools are marked — these acquire
+the per-project write lock (see [Concurrency](#concurrency-model)).
+
+### Project lifecycle
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `health` | — | Ping the daemon, report the active project. First call of every session. |
+| `list_templates` | — | Enumerate project templates (`research`, `reading`, `business`, `general`, …). |
+| `create_project` | ✓ | Scaffold a new project from a template. |
+| `list_projects` | — | Recent projects + currently active one. |
+| `open_project` | ✓ | Validate a path and add it to recents. |
+| `select_project` | ✓ | Make a project active so later calls can omit `projectPath`. |
+
+### Configuration
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `configure_llm` | ✓ | Provider / model / API key / context window. |
+| `get_llm_config` | — | Read the current LLM configuration. |
+| `configure_embedding` | ✓ | OpenAI-compatible `/v1/embeddings` endpoint. Strongly recommended — without it `query` quality degrades. |
+| `configure_search` | ✓ | Web-search provider (Tavily) used by `deep_research`. |
+
+### Sources & ingest
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `list_sources` | — | Files currently under `raw/sources/`. |
+| `import_documents` | ✓ | Copy files into `raw/sources/` and run the two-step ingest pipeline. Accepts a `paths` array; use `wait: false` to stream progress. |
+| `delete_source` | ✓ | Remove a source (with cascade cleanup of entity/summary pages). |
+
+### Query & explore
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `query` | ✓ when `saveToWiki: true` | Graph-augmented retrieval + LLM answer. Optionally persists the answer to `wiki/queries/<slug>-<date>.md` and ingests it. |
+| `graph` | — | Three modes: `communities` (Louvain clusters), `neighbors` (related pages), `insights` (surprising connections + knowledge gaps). |
+| `list_pages` | — | Wiki pages, optionally filtered by frontmatter `type`. |
+| `read_page` | — | Markdown content of a single page. |
+
+### Review & audit
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `review` | — | List items flagged by the pipeline for human judgment. |
+| `resolve_review_item` | ✓ | Mark a review item resolved with an action (`accepted`, `rejected`, `merged`, …). |
+| `lint` | ✓ | Structural lint; pass `semantic: true` for the slower LLM-backed contradiction detector. |
+
+### Deep research
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `deep_research` | ✓ | Web search (Tavily) + LLM synthesis. Optionally saves a research page to the wiki. Requires `configure_search`. |
+
+### Job control
+
+| Tool | Mutating | Purpose |
+| --- | :---: | --- |
+| `job_status` | — | Poll any async job by id, or list all running/pending jobs. |
+| `cancel_job` | ✓ | Abort an in-flight job. |
+
+Every long-running tool (`import_documents`, `query`, `lint`, `deep_research`)
+returns a `jobId` and accepts `wait: boolean`. When `wait: true` the call
+blocks until the job finishes. When `wait: false` it returns immediately and
+the caller polls `job_status`. When a `progressToken` is supplied (Claude Code
+does this automatically), SSE progress frames are forwarded as MCP progress
+notifications so the client can show a live progress bar.
+
+## MCP resources
+
+Resources are read-only URIs; use them instead of tools when you just need
+content, not computation.
+
+| URI | Returns |
+| --- | --- |
+| `wiki://overview` | `wiki/overview.md` — public-facing summary of the wiki. |
+| `wiki://index` | `wiki/index.md` — pages grouped by type. |
+| `wiki://purpose` | `purpose.md` — the project charter. |
+| `wiki://schema` | `schema.md` — page types, naming, frontmatter rules. |
+| `wiki://log` | `wiki/log.md` — reverse-chronological edits. |
+| `wiki://page/{path}` | Any page by project-relative path (e.g. `wiki://page/wiki/entities/openai.md`). |
+
+Reading a resource is **cheaper and faster** than calling `read_page` and
+should be an agent's default when it knows exactly which page it wants.
+
+## MCP prompts
+
+Server-side prompt templates the agent can load via `prompts/list` / `prompts/get`
+(`/mcp` in Claude Code; prompt picker in Cursor). These teach the agent *how*
+to chain the tools, not just what each one does.
+
+| Prompt | Arguments | When to load |
+| --- | --- | --- |
+| `quickstart` | — | First call in a new session. Orients the agent on Quick Start order and the per-project lock. |
+| `research_sprint` | `topic`, `sources?`, `project_path?` | End-to-end: ingest + deep-research + save + audit in one coordinated sprint. |
+| `wiki_audit` | `semantic?`, `project_path?` | Prep a reviewer-ready report before handing off to a human. |
+
+For the long-form reference (decision rules, async-vs-blocking heuristics,
+anti-patterns, researcher-swarm patterns) see
+[`.claude/skills/research-book/SKILL.md`](.claude/skills/research-book/SKILL.md).
+Claude Code auto-loads the skill whenever the `research-book` MCP server is
+connected; other clients can read the file manually.
+
+## The core agent workflow
+
+The intended shape of an automated research session:
+
+1. **`health`** → verify the daemon is up, see the active project.
+2. **`list_projects`** → if the topic has no project yet, `create_project`
+   then `select_project`.
+3. **Bootstrap the charter.** Every new project ships with *template*
+   `purpose.md` and `wiki/overview.md` (placeholder sections, not content).
+   The agent interviews the user and fills both before ingesting anything.
+   This is the one explicit exception to "never hand-write wiki markdown"
+   — these two files are project scaffolding.
+4. **`configure_llm`**, optionally **`configure_embedding`** (strongly
+   recommended), optionally **`configure_search`** (only if deep research is
+   in scope).
+5. **`import_documents`** with a `paths` array and a descriptive
+   `folderContext`. Prefer `wait: false` for big batches; poll `job_status`.
+6. **Read before asking.** Fetch `wiki://overview` + `wiki://index`. Use
+   `query` for concepts, `graph mode=neighbors` for connections,
+   `graph mode=insights` for gaps and surprises.
+7. **`query` with `saveToWiki: true`** for answers worth remembering; new
+   material flows back into the pipeline automatically.
+8. **`deep_research`** to fill specific gaps.
+9. **`lint`** (structural) and optionally `lint semantic: true` (LLM-backed)
+   before handing back to a human.
+10. **`review`** to list flagged items; `resolve_review_item` the obvious
+    ones, leave the ambiguous ones for the human.
+
+The `quickstart` prompt encodes exactly this flow.
+
+## Wire it into an MCP client
+
+### Cursor
+
+Edit `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "research-book": {
+      "command": "node",
+      "args": ["/absolute/path/to/research-book/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Restart Cursor. The tools, resources, and prompts above appear in the
+Composer / Agent panel.
+
+### Claude Code
+
+macOS / Linux:
+
+```bash
+claude mcp add research-book -- node /absolute/path/to/research-book/mcp-server/dist/index.js
+```
+
+Windows (native, not WSL) — wrap `node` in `cmd /c` so Claude Code spawns
+the server through the shell (documented workaround for Windows stdio servers
+reporting `Connection closed`):
+
+```powershell
+claude mcp add research-book -- cmd /c node C:\absolute\path\to\research-book\mcp-server\dist\index.js
+```
+
+Cross-platform alternative:
+
+```bash
+claude mcp add-json research-book '{
+  "type": "stdio",
+  "command": "node",
+  "args": ["/absolute/path/to/research-book/mcp-server/dist/index.js"]
+}'
+```
+
+Scope flags (optional, before the server name):
+
+- `--scope local` (default) — current project only, not checked in.
+- `--scope project` — writes `.mcp.json` at the repo root, shared with teammates.
+- `--scope user` — available in every project.
+
+Verify:
+
+```bash
+claude mcp list
+claude mcp get research-book
+```
+
+In a Claude Code session, type `/mcp` to see `research-book` listed. When the
+desktop app is running, all 23 tools become callable. The `research-book`
+skill at `.claude/skills/research-book/SKILL.md` auto-loads and teaches the
+agent the workflow above.
+
+### Claude Desktop
+
+Edit `claude_desktop_config.json` (Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "research-book": {
+      "command": "node",
+      "args": ["/absolute/path/to/research-book/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop; the tools appear under the hammer icon.
+
+## Authentication
+
+The desktop app generates a **per-install bearer token** on first launch and
+stores it under the OS config dir:
+
+| OS | Path |
+| --- | --- |
+| macOS | `~/Library/Application Support/llm-wiki/api-token` |
+| Linux | `$XDG_CONFIG_HOME/llm-wiki/api-token` |
+| Windows | `%APPDATA%\llm-wiki\api-token` |
+
+The MCP server reads the token from disk automatically. To override (e.g. in
+a container that mounts the token elsewhere), set:
+
+- `LLM_WIKI_API_TOKEN` — bearer token
+- `LLM_WIKI_API_URL` — daemon base URL (defaults to `http://127.0.0.1:19827`)
+
+Every request to `/api/*` must carry `Authorization: Bearer <token>`.
+Unauthenticated requests get `401`. The token is written with user-only
+permissions; don't commit it.
+
+## Concurrency model
+
+The daemon enforces a **per-project exclusive write lock**:
+
+- **Read-only calls** (`list_*`, `read_page`, `graph`, `review`, `health`,
+  `wiki://*` resources) never block. Unlimited concurrency.
+- **Mutating calls** on the **same project** serialize. A second mutation
+  while one is in flight returns `HTTP 409 Conflict` with `Retry-After: 5`.
+- **Mutating calls** on **different projects** run concurrently.
+
+The lock is RAII in Rust (`src-tauri/src/api/locks.rs`): it releases
+automatically when the renderer's reply finishes streaming, including on
+error paths and client disconnects.
+
+### Multi-agent patterns
+
+- **Fan-out across projects.** Run N agents, one per project. No contention;
+  fully parallel.
+- **Fan-out within a project** (researcher swarm). Spawn N agents on the same
+  project, each with a narrow subtopic. They naturally queue on the lock;
+  expect `409`s and respect `Retry-After`. Don't spin in a tight retry loop
+  — call `job_status` to see what's running, back off, then retry.
+- **Ingest many files.** Don't loop `import_documents` per file. Use a single
+  call with a `paths` array — the pipeline batches internally and only takes
+  the lock once.
+
+## Agent / human coexistence
+
+Every `query` tool call is recorded as a conversation in the desktop app's
+chat sidebar with `source: "mcp"`. The sidebar has an **Agent / You / All**
+filter so a reviewer can see exactly what agents have asked, in what order,
+with what citations.
+
+This coexistence was hardened in this fork:
+
+- Per-project stores (`review`, `chat`, `research`, `activity`, `lint`) now
+  clear and reload on every project switch so the GUI never flashes the
+  previous project's reviews or conversations.
+- Auto-save only writes the currently active project's data to disk; the
+  previous leak where A's reviews could be persisted into B's
+  `.llm-wiki/review.json` is gone.
+
+## CLI
+
+Humans and scripts can hit the same daemon without MCP via the bundled CLI:
+
+```bash
+research-book health
+research-book list-projects
+research-book select-project /Users/me/wikis/my-research
+research-book configure-llm --provider openai --model gpt-4o-mini --api-key sk-...
+research-book import-documents ~/papers/*.pdf --folder-context "literature review"
+research-book query "What did we conclude about retrieval-augmented agents?" --save-to-wiki
+research-book graph --mode insights
+research-book lint --semantic
+research-book review
+```
+
+`research-book help` lists every command. The CLI is a thin wrapper over the
+same `/api/*` endpoints the MCP server uses — agents should still prefer MCP
+for structured tool use; the CLI is for humans scripting.
+
+## Build from source
+
+### Desktop app (required — the MCP server is useless without it)
+
+```bash
+# Prerequisites: Node 20+, Rust 1.70+
+git clone https://github.com/SentImperior666/research-book.git
+cd research-book
+npm install
+npm run tauri dev        # dev build with hot reload
+npm run tauri build      # production .dmg / .msi / .deb / .AppImage
+```
+
+### MCP server
+
+```bash
+cd mcp-server
+npm install
+npm run build            # produces dist/index.js (MCP) + dist/cli.js (CLI)
+```
+
+Binaries exposed (symlinked via `bin` in `package.json`):
+
+- `research-book-mcp` — stdio MCP server, the main entry
+- `research-book` — CLI wrapper over the same daemon
+
+### Chrome extension (optional)
+
+See [`docs/how-to-use-llm-wiki.md`](docs/how-to-use-llm-wiki.md#chrome-extension).
+
+## Develop and test
+
+```bash
+# MCP server
+cd mcp-server
+npm run dev              # tsx src/index.ts with live reload
+npm run cli -- health    # run the CLI against the live daemon
+npm test                 # vitest: tools + client + CLI against an in-process fake daemon
+npm run typecheck        # tsc --noEmit
+
+# Tauri app
+npm run tauri dev        # at the repo root
+npm test                 # renderer tests (if configured)
+```
+
+The integration test suite at `mcp-server/src/__tests__/tools.test.ts` runs
+against an in-process Node HTTP server that mimics the daemon — no Tauri
+app required. To exercise the full stack against the real daemon:
+
+```bash
+LLM_WIKI_API_URL=http://127.0.0.1:19827 npm run cli -- health
+```
+
+## Repository layout
+
+```
+research-book/
+├── src/                    # React + Zustand renderer (the GUI)
+│   ├── lib/                # Business logic — shared by GUI and MCP
+│   └── stores/             # Zustand per-project stores
+├── src-tauri/              # Tauri v2 Rust backend
+│   ├── src/api/            # HTTP + SSE surface, auth, locks, bridge to renderer
+│   └── src/clip_server.rs  # Chrome extension clip endpoint
+├── mcp-server/             # The MCP adapter (this fork's main addition)
+│   ├── src/index.ts        # Stdio MCP entry
+│   ├── src/cli.ts          # Human-facing CLI
+│   ├── src/tools.ts        # 23 MCP tools
+│   ├── src/resources.ts    # wiki://* resources
+│   ├── src/prompts.ts      # quickstart / research_sprint / wiki_audit
+│   ├── src/client.ts       # Typed HTTP client for the daemon
+│   └── src/__tests__/      # Vitest integration tests
+├── extension/              # Chrome web clipper (unchanged from upstream)
+├── .claude/skills/research-book/SKILL.md   # Claude Code skill
+└── docs/how-to-use-llm-wiki.md             # GUI usage guide (upstream README)
+```
 
 ## Credits
 
-The foundational methodology comes from **Andrej Karpathy**'s [llm-wiki.md](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), which describes the pattern of using LLMs to incrementally build and maintain a personal wiki. The original document is an abstract design pattern; this project is a concrete implementation with substantial extensions.
-
-## What We Kept from the Original
-
-The core architecture follows Karpathy's design faithfully:
-
-- **Three-layer architecture**: Raw Sources (immutable) → Wiki (LLM-generated) → Schema (rules & config)
-- **Three core operations**: Ingest, Query, Lint
-- **index.md** as the content catalog and LLM navigation entry point
-- **log.md** as the chronological operation record with parseable format
-- **[[wikilink]]** syntax for cross-references
-- **YAML frontmatter** on every wiki page
-- **Obsidian compatibility** — the wiki directory works as an Obsidian vault
-- **Human curates, LLM maintains** — the fundamental role division
-
-<p align="center">
-  <img src="assets/5-obsidian_compatibility.jpg" width="100%" alt="Obsidian Compatibility">
-</p>
-
-## What We Changed & Added
-
-### 1. From CLI to Desktop Application
-
-The original is an abstract pattern document designed to be copy-pasted to an LLM agent. We built it into a **full cross-platform desktop application** with:
-- **Three-column layout**: Knowledge Tree / File Tree (left) + Chat (center) + Preview (right)
-- **Icon sidebar** for switching between Wiki, Sources, Search, Graph, Lint, Review, Deep Research, Settings
-- **Custom resizable panels** — drag-to-resize left and right panels with min/max constraints
-- **Activity panel** — real-time processing status showing file-by-file ingest progress
-- **All state persisted** — conversations, settings, review items, project config survive restarts
-- **Scenario templates** — Research, Reading, Personal Growth, Business, General — each pre-configures purpose.md and schema.md
-
-### 2. Purpose.md — The Wiki's Soul
-
-The original has Schema (how the wiki works) but no formal place for **why** the wiki exists. We added `purpose.md`:
-- Defines goals, key questions, research scope, evolving thesis
-- LLM reads it during every ingest and query for context
-- LLM can suggest updates based on usage patterns
-- Different from schema — schema is structural rules, purpose is directional intent
-
-### 3. Two-Step Chain-of-Thought Ingest
-
-The original describes a single-step ingest where the LLM reads and writes simultaneously. We split it into **two sequential LLM calls** for significantly better quality:
-
-```
-Step 1 (Analysis): LLM reads source → structured analysis
-  - Key entities, concepts, arguments
-  - Connections to existing wiki content
-  - Contradictions & tensions with existing knowledge
-  - Recommendations for wiki structure
-
-Step 2 (Generation): LLM takes analysis → generates wiki files
-  - Source summary with frontmatter (type, title, sources[])
-  - Entity pages, concept pages with cross-references
-  - Updated index.md, log.md, overview.md
-  - Review items for human judgment
-  - Search queries for Deep Research
-```
-
-Additional ingest enhancements beyond the original:
-- **SHA256 incremental cache** — source file content is hashed before ingest; unchanged files are skipped automatically, saving LLM tokens and time
-- **Persistent ingest queue** — serial processing prevents concurrent LLM calls; queue persisted to disk, survives app restart; failed tasks auto-retry up to 3 times
-- **Folder import** — recursive folder import preserving directory structure; folder path passed to LLM as classification context (e.g., "papers > energy" helps categorize content)
-- **Queue visualization** — Activity Panel shows progress bar, pending/processing/failed tasks with cancel and retry buttons
-- **Auto-embedding** — when vector search is enabled, new pages are automatically embedded after ingest
-- **Source traceability** — every generated wiki page includes a `sources: []` field in YAML frontmatter, linking back to the raw source files that contributed to it
-- **overview.md auto-update** — global summary page regenerated on every ingest to reflect the latest state of the wiki
-- **Guaranteed source summary** — fallback ensures a source summary page is always created, even if the LLM omits it
-- **Language-aware generation** — LLM responds in the user's configured language (English or Chinese)
-
-### 4. Knowledge Graph with Relevance Model
-
-<p align="center">
-  <img src="assets/3-knowledge_graph.jpg" width="100%" alt="Knowledge Graph">
-</p>
-
-The original mentions `[[wikilinks]]` for cross-references but has no graph analysis. We built a **full knowledge graph visualization and relevance engine**:
-
-**4-Signal Relevance Model:**
-| Signal | Weight | Description |
-|--------|--------|-------------|
-| Direct link | ×3.0 | Pages linked via `[[wikilinks]]` |
-| Source overlap | ×4.0 | Pages sharing the same raw source (via frontmatter `sources[]`) |
-| Adamic-Adar | ×1.5 | Pages sharing common neighbors (weighted by neighbor degree) |
-| Type affinity | ×1.0 | Bonus for same page type (entity↔entity, concept↔concept) |
-
-**Graph Visualization (sigma.js + graphology + ForceAtlas2):**
-- Node colors by page type or community, sizes scaled by link count (√ scaling)
-- Edge thickness and color by relevance weight (green=strong, gray=weak)
-- Hover interaction: neighbors stay visible, non-neighbors dim, edges highlight with relevance score label
-- Zoom controls (ZoomIn, ZoomOut, Fit-to-screen)
-- Position caching prevents layout jumps when data updates
-- Legend switches between type counts and community info based on coloring mode
-
-### 5. Louvain Community Detection
-
-Not in the original. Automatic discovery of knowledge clusters using the **Louvain algorithm** (graphology-communities-louvain):
-
-- **Auto-clustering** — discovers which pages naturally group together based on link topology, independent of predefined page types
-- **Type / Community toggle** — switch between coloring nodes by page type (entity, concept, source...) or by discovered knowledge cluster
-- **Cohesion scoring** — each community scored by intra-edge density (actual edges / possible edges); low-cohesion clusters (< 0.15) flagged with warning
-- **12-color palette** — distinct visual separation between clusters
-- **Community legend** — shows top node label, member count, and cohesion per cluster
-
-<p align="center">
-  <img src="assets/kg_community.jpg" width="100%" alt="Louvain Community Detection">
-</p>
-
-### 6. Graph Insights — Surprising Connections & Knowledge Gaps
-
-Not in the original. The system **automatically analyzes graph structure** to surface actionable insights:
-
-**Surprising Connections:**
-- Detects unexpected relationships: cross-community edges, cross-type links, peripheral↔hub couplings
-- Composite surprise score ranks the most noteworthy connections
-- Dismissable — mark connections as reviewed so they don't reappear
-
-**Knowledge Gaps:**
-- **Isolated pages** (degree ≤ 1) — pages with few or no connections to the rest of the wiki
-- **Sparse communities** (cohesion < 0.15, ≥ 3 pages) — knowledge areas with weak internal cross-references
-- **Bridge nodes** (connecting 3+ clusters) — critical junction pages that hold multiple knowledge areas together
-
-**Interactive:**
-- Click any insight card to **highlight** corresponding nodes and edges in the graph; click again to deselect
-- Knowledge gaps and bridge nodes have a **Deep Research button** — triggers LLM-optimized research with domain-aware topics (reads overview.md + purpose.md for context)
-- Research topic shown in **editable confirmation dialog** before starting — user can refine topic and search queries
-
-<p align="center">
-  <img src="assets/kg_insights.jpg" width="100%" alt="Graph Insights">
-</p>
-
-### 7. Optimized Query Retrieval Pipeline
-
-The original describes a simple query where the LLM reads relevant pages. We built a **multi-phase retrieval pipeline** with optional vector search and budget control:
-
-```
-Phase 1: Tokenized Search
-  - English: word splitting + stop word removal
-  - Chinese: CJK bigram tokenization (每个 → [每个, 个…])
-  - Title match bonus (+10 score)
-  - Searches both wiki/ and raw/sources/
-
-Phase 1.5: Vector Semantic Search (optional)
-  - Embedding via any OpenAI-compatible /v1/embeddings endpoint
-  - Stored in LanceDB (Rust backend) for fast ANN retrieval
-  - Cosine similarity finds semantically related pages even without keyword overlap
-  - Results merged into search: boosts existing matches + adds new discoveries
-
-Phase 2: Graph Expansion
-  - Top search results used as seed nodes
-  - 4-signal relevance model finds related pages
-  - 2-hop traversal with decay for deeper connections
-
-Phase 3: Budget Control
-  - Configurable context window: 4K → 1M tokens
-  - Proportional allocation: 60% wiki pages, 20% chat history, 5% index, 15% system
-  - Pages prioritized by combined search + graph relevance score
-
-Phase 4: Context Assembly
-  - Numbered pages with full content (not just summaries)
-  - System prompt includes: purpose.md, language rules, citation format, index.md
-  - LLM instructed to cite pages by number: [1], [2], etc.
-```
-
-**Vector Search** is fully optional — disabled by default, enabled in Settings with independent endpoint, API key, and model configuration. When disabled, the pipeline falls back to tokenized search + graph expansion. Benchmark: overall recall improved from 58.2% to 71.4% with vector search enabled.
-
-### 8. Multi-Conversation Chat with Persistence
-
-The original has a single query interface. We built **full multi-conversation support**:
-
-- **Independent chat sessions** — create, rename, delete conversations
-- **Conversation sidebar** — quick switching between topics
-- **Per-conversation persistence** — each conversation saved to `.llm-wiki/chats/{id}.json`
-- **Configurable history depth** — limit how many messages are sent as context (default: 10)
-- **Cited references panel** — collapsible section on each response showing which wiki pages were used, grouped by type with icons
-- **Reference persistence** — cited pages stored directly in message data, stable across restarts
-- **Regenerate** — re-generate the last response with one click (removes last assistant + user message pair, re-sends)
-- **Save to Wiki** — archive valuable answers to `wiki/queries/`, then auto-ingest to extract entities/concepts into the knowledge network
-
-### 9. Thinking / Reasoning Display
-
-Not in the original. For LLMs that emit `<think>` blocks (DeepSeek, QwQ, etc.):
-
-- **Streaming thinking** — rolling 5-line display with opacity fade during generation
-- **Collapsed by default** — thinking blocks hidden after completion, click to expand
-- **Visual separation** — thinking content shown in distinct style, separate from the main response
-
-### 10. KaTeX Math Rendering
-
-Not in the original. Full LaTeX math support across all views:
-
-- **KaTeX rendering** — inline `$...$` and block `$$...$$` formulas rendered via remark-math + rehype-katex
-- **Milkdown math plugin** — preview editor renders math natively via @milkdown/plugin-math
-- **Auto-detection** — bare `\begin{aligned}` and other LaTeX environments automatically wrapped with `$$` delimiters
-- **Unicode fallback** — 100+ symbol mappings (α, ∑, →, ≤, etc.) for simple inline notation outside math blocks
-
-### 11. Review System (Async Human-in-the-Loop)
-
-The original suggests staying involved during ingest. We added an **asynchronous review queue**:
-
-- LLM flags items needing human judgment during ingest
-- **Predefined action types**: Create Page, Deep Research, Skip — constrained to prevent LLM hallucination of arbitrary actions
-- **Search queries generated at ingest time** — LLM pre-generates optimized web search queries for each review item
-- User handles reviews at their convenience — doesn't block ingest
-
-### 12. Deep Research
-
-<p align="center">
-  <img src="assets/1-deepresearch.jpg" width="100%" alt="Deep Research">
-</p>
-
-Not in the original. When the LLM identifies knowledge gaps:
-
-- **Web search** (Tavily API) finds relevant sources with full content extraction (no truncation)
-- **Multiple search queries** per topic — LLM-generated at ingest time, optimized for search engines
-- **LLM-optimized research topics** — when triggered from Graph Insights, LLM reads overview.md + purpose.md to generate domain-specific topics and queries (not generic keywords)
-- **User confirmation dialog** — editable topic and search queries shown for review before research starts
-- **LLM synthesizes** findings into a wiki research page with cross-references to existing wiki
-- **Thinking display** — `<think>` blocks shown as collapsible sections during synthesis, auto-scroll to latest content
-- **Auto-ingest** — research results automatically processed to extract entities/concepts into the wiki
-- **Task queue** with 3 concurrent tasks
-- **Research Panel** — dedicated sidebar panel with dynamic height, real-time streaming progress
-
-### 13. Browser Extension (Web Clipper)
-
-<p align="center">
-  <img src="assets/4-chrome_extension_webclipper.jpg" width="100%" alt="Chrome Extension Web Clipper">
-</p>
-
-The original mentions Obsidian Web Clipper. We built a **dedicated Chrome Extension** (Manifest V3):
-
-- **Mozilla Readability.js** for accurate article extraction (strips ads, nav, sidebars)
-- **Turndown.js** for HTML → Markdown conversion with table support
-- **Project picker** — choose which wiki to clip into (supports multi-project)
-- **Local HTTP API** (port 19827, tiny_http) — Extension ↔ App communication
-- **Auto-ingest** — clipped content automatically triggers the two-step ingest pipeline
-- **Clip watcher** — polls every 3 seconds for new clips, processes automatically
-- **Offline preview** — shows extracted content even when app is not running
-
-### 14. Multi-format Document Support
-
-The original focuses on text/markdown. We support structured extraction preserving document semantics:
-
-| Format | Method |
-|--------|--------|
-| PDF | pdf-extract (Rust) with file caching |
-| DOCX | docx-rs — headings, bold/italic, lists, tables → structured Markdown |
-| PPTX | ZIP + XML — slide-by-slide extraction with heading/list structure |
-| XLSX/XLS/ODS | calamine — proper cell types, multi-sheet support, Markdown tables |
-| Images | Native preview (png, jpg, gif, webp, svg, etc.) |
-| Video/Audio | Built-in player |
-| Web clips | Readability.js + Turndown.js → clean Markdown |
-
-### 15. File Deletion with Cascade Cleanup
-
-The original has no deletion mechanism. We added **intelligent cascade deletion**:
-
-- Deleting a source file removes its wiki summary page
-- **3-method matching** finds related wiki pages: frontmatter `sources[]` field, source summary page name, frontmatter section references
-- **Shared entity preservation** — entity/concept pages linked to multiple sources only have the deleted source removed from their `sources[]` array, not deleted entirely
-- **Index cleanup** — removed pages are purged from index.md
-- **Wikilink cleanup** — dead `[[wikilinks]]` to deleted pages are removed from remaining wiki pages
-
-### 16. Configurable Context Window
-
-Not in the original. Users can configure how much context the LLM receives:
-
-- **Slider from 4K to 1M tokens** — adapts to different LLM capabilities
-- **Proportional budget allocation** — larger windows get proportionally more wiki content
-- **60/20/5/15 split** — wiki pages / chat history / index / system prompt
-
-### 17. Cross-Platform Compatibility
-
-The original is platform-agnostic (abstract pattern). We handle concrete cross-platform concerns:
-
-- **Path normalization** — unified `normalizePath()` used across 22+ files, backslash → forward slash
-- **Unicode-safe string handling** — char-based slicing instead of byte-based (prevents crashes on CJK filenames)
-- **macOS close-to-hide** — close button hides window (app stays running in background), click dock icon to restore, Cmd+Q to quit
-- **Windows/Linux close confirmation** — confirmation dialog before quitting to prevent accidental data loss
-- **Tauri v2** — native desktop on macOS, Windows, Linux
-- **GitHub Actions CI/CD** — automated builds for macOS (ARM + Intel), Windows (.msi), Linux (.deb / .AppImage)
-
-### 18. Other Additions
-
-- **i18n** — English + Chinese interface (react-i18next)
-- **Settings persistence** — LLM provider, API key, model, context size, language saved via Tauri Store
-- **Obsidian config** — auto-generated `.obsidian/` directory with recommended settings
-- **Markdown rendering** — GFM tables with borders, proper code blocks, wikilink processing in chat and preview
-- **Multi-provider LLM support** — OpenAI, Anthropic, Google, Ollama, Custom — each with provider-specific streaming and headers
-- **15-minute timeout** — long ingest operations won't fail prematurely
-- **dataVersion signaling** — graph and UI automatically refresh when wiki content changes
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Desktop | Tauri v2 (Rust backend) |
-| Frontend | React 19 + TypeScript + Vite |
-| UI | shadcn/ui + Tailwind CSS v4 |
-| Editor | Milkdown (ProseMirror-based WYSIWYG) |
-| Graph | sigma.js + graphology + ForceAtlas2 |
-| Search | Tokenized search + graph relevance + optional vector (LanceDB) |
-| Vector DB | LanceDB (Rust, embedded, optional) |
-| PDF | pdf-extract |
-| Office | docx-rs + calamine |
-| i18n | react-i18next |
-| State | Zustand |
-| LLM | Streaming fetch (OpenAI, Anthropic, Google, Ollama, Custom) |
-| Web Search | Tavily API |
-
-## Installation
-
-### Pre-built Binaries
-
-Download from [Releases](https://github.com/nashsu/llm_wiki/releases):
-- **macOS**: `.dmg` (Apple Silicon + Intel)
-- **Windows**: `.msi`
-- **Linux**: `.deb` / `.AppImage`
-
-### Build from Source
-
-```bash
-# Prerequisites: Node.js 20+, Rust 1.70+
-git clone https://github.com/nashsu/llm_wiki.git
-cd llm_wiki
-npm install
-npm run tauri dev      # Development
-npm run tauri build    # Production build
-```
-
-### Chrome Extension
-
-1. Open `chrome://extensions`
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select the `extension/` directory
-
-## Quick Start
-
-1. Launch the app → Create a new project (choose a template)
-2. Go to **Settings** → Configure your LLM provider (API key + model)
-3. Go to **Sources** → Import documents (PDF, DOCX, MD, etc.)
-4. Watch the **Activity Panel** — LLM automatically builds wiki pages
-5. Use **Chat** to query your knowledge base
-6. Browse the **Knowledge Graph** to see connections
-7. Check **Review** for items needing your attention
-8. Run **Lint** periodically to maintain wiki health
-
-## Project Structure
-
-```
-my-wiki/
-├── purpose.md              # Goals, key questions, research scope
-├── schema.md               # Wiki structure rules, page types
-├── raw/
-│   ├── sources/            # Uploaded documents (immutable)
-│   └── assets/             # Local images
-├── wiki/
-│   ├── index.md            # Content catalog
-│   ├── log.md              # Operation history
-│   ├── overview.md         # Global summary (auto-updated)
-│   ├── entities/           # People, organizations, products
-│   ├── concepts/           # Theories, methods, techniques
-│   ├── sources/            # Source summaries
-│   ├── queries/            # Saved chat answers + research
-│   ├── synthesis/          # Cross-source analysis
-│   └── comparisons/        # Side-by-side comparisons
-├── .obsidian/              # Obsidian vault config (auto-generated)
-└── .llm-wiki/              # App config, chat history, review items
-```
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=nashsu%2Fllm_wiki&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&legend=top-left" />
- </picture>
-</a>
+- **[Andrej Karpathy](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)**
+  for the original LLM Wiki methodology.
+- **[nashsu/llm_wiki](https://github.com/nashsu/llm_wiki)** for the concrete
+  desktop implementation this fork builds on — the pipeline, graph, review
+  system, and Chrome web clipper are all upstream.
+- This fork adds the HTTP API, per-project write lock, MCP server, CLI, and
+  Claude Code skill so agents can drive the same pipeline.
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for details.
+GNU General Public License v3.0 — see [LICENSE](LICENSE). The MCP server
+subpackage (`mcp-server/`) is MIT-licensed in its own `package.json` to
+allow embedding in differently-licensed agents; the desktop app itself
+remains GPL-3.0 as inherited from upstream.
