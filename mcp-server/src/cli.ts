@@ -200,15 +200,14 @@ const COMMANDS: Record<string, (client: WikiDaemonClient, args: ParsedArgs) => P
     if (args.flags.mode) query.mode = String(args.flags.mode)
     if (args.flags.page) query.page = String(args.flags.page)
     if (args.flags.limit) query.limit = String(args.flags.limit)
-    const body: Record<string, unknown> = {}
-    if (args.flags["project-path"]) body.projectPath = args.flags["project-path"]
-    printJson(await client.request("GET", "/api/graph", { body, query }))
+    if (args.flags["project-path"]) query.projectPath = String(args.flags["project-path"])
+    printJson(await client.request("GET", "/api/graph", { query }))
   },
 
   async review(client, args) {
-    const body: Record<string, unknown> = {}
-    if (args.flags["project-path"]) body.projectPath = args.flags["project-path"]
-    printJson(await client.request("GET", "/api/review", { body }))
+    const query: Record<string, string> = {}
+    if (args.flags["project-path"]) query.projectPath = String(args.flags["project-path"])
+    printJson(await client.request("GET", "/api/review", { query }))
   },
 
   async "resolve-review-item"(client, args) {
@@ -223,21 +222,19 @@ const COMMANDS: Record<string, (client: WikiDaemonClient, args: ParsedArgs) => P
   },
 
   async "list-pages"(client, args) {
-    const body: Record<string, unknown> = {}
-    if (args.flags["project-path"]) body.projectPath = args.flags["project-path"]
     const query: Record<string, string> = {}
+    if (args.flags["project-path"]) query.projectPath = String(args.flags["project-path"])
     if (args.flags.type) query.type = String(args.flags.type)
-    printJson(await client.request("GET", "/api/wiki/pages", { body, query }))
+    printJson(await client.request("GET", "/api/wiki/pages", { query }))
   },
 
   async "read-page"(client, args) {
     const path = args.flags.path ?? args.positional[0]
     if (!path) throw new Error("read-page requires a project-relative path")
-    const body: Record<string, unknown> = {}
-    if (args.flags["project-path"]) body.projectPath = args.flags["project-path"]
+    const query: Record<string, string> = { path: String(path) }
+    if (args.flags["project-path"]) query.projectPath = String(args.flags["project-path"])
     const data = await client.request<{ content: string }>("GET", "/api/wiki/page", {
-      body,
-      query: { path: String(path) },
+      query,
     })
     process.stdout.write(data.content + "\n")
   },
